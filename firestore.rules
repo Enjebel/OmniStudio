@@ -1,0 +1,158 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net catch-all deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidTimestamp(val) {
+      return val is timestamp && val <= request.time;
+    }
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['userId', 'displayName', 'email', 'role', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'userId', 'displayName', 'email', 'role', 'subscriptionTier',
+          'billingCycle', 'themePreference', 'aiCreditsRemaining',
+          'lastCreditResetDate', 'verifiedTransactionId', 'createdAt', 'updatedAt'
+        ])
+        && data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128
+        && data.displayName is string && data.displayName.size() > 0 && data.displayName.size() <= 100
+        && data.email is string && data.email.size() > 0 && data.email.size() <= 150
+        && data.role is string && data.role.size() > 0 && data.role.size() <= 80
+        && (!('subscriptionTier' in data) || (data.subscriptionTier is string && data.subscriptionTier in ['FREE', 'BASIC', 'PRO', 'PREMIUM']))
+        && (!('billingCycle' in data) || (data.billingCycle is string && data.billingCycle in ['MONTHLY', 'YEARLY']))
+        && (!('themePreference' in data) || (data.themePreference is string && data.themePreference in ['DARK', 'LIGHT']))
+        && (!('aiCreditsRemaining' in data) || (data.aiCreditsRemaining is int && data.aiCreditsRemaining >= 0 && data.aiCreditsRemaining <= 10000))
+        && (!('lastCreditResetDate' in data) || (data.lastCreditResetDate is string && data.lastCreditResetDate.size() <= 20))
+        && (!('verifiedTransactionId' in data) || (data.verifiedTransactionId is string && data.verifiedTransactionId.size() <= 128))
+        && isValidTimestamp(data.createdAt)
+        && isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidSubscriptionTransaction(data) {
+      return data.keys().hasAll([
+          'userId', 'planTier', 'billingCycle', 'amountUsd',
+          'paymentMethod', 'paymentStatus', 'transactionRef', 'billingEmail', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'userId', 'planTier', 'billingCycle', 'amountUsd',
+          'paymentMethod', 'paymentStatus', 'transactionRef', 'billingEmail', 'createdAt'
+        ])
+        && data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128
+        && data.planTier is string && data.planTier in ['BASIC', 'PRO', 'PREMIUM']
+        && data.billingCycle is string && data.billingCycle in ['MONTHLY', 'YEARLY']
+        && (data.amountUsd is int || data.amountUsd is float) && data.amountUsd > 0 && data.amountUsd <= 1000
+        && data.paymentMethod is string && data.paymentMethod.size() >= 3 && data.paymentMethod.size() <= 80
+        && data.paymentStatus is string && data.paymentStatus == 'VERIFIED'
+        && data.transactionRef is string && data.transactionRef.size() >= 6 && data.transactionRef.size() <= 120
+        && data.billingEmail is string && data.billingEmail.size() >= 3 && data.billingEmail.size() <= 150
+        && isValidTimestamp(data.createdAt);
+    }
+
+    function isValidAdCampaign(data) {
+      return data.keys().hasAll(['userId', 'name', 'productName', 'productPrice', 'framework', 'aspectRatio', 'headline', 'cta', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'userId', 'name', 'productName', 'productPrice', 'category',
+          'framework', 'aspectRatio', 'headline', 'cta', 'motionPreset',
+          'bgPreset', 'createdAt', 'updatedAt'
+        ])
+        && data.userId is string && data.userId.size() > 0 && data.userId.size() <= 128
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 120
+        && data.productName is string && data.productName.size() > 0 && data.productName.size() <= 120
+        && data.productPrice is string && data.productPrice.size() <= 40
+        && (!('category' in data) || (data.category is string && data.category.size() <= 80))
+        && data.framework is string && data.framework.size() <= 80
+        && data.aspectRatio is string && data.aspectRatio.size() <= 20
+        && data.headline is string && data.headline.size() <= 200
+        && data.cta is string && data.cta.size() <= 150
+        && (!('motionPreset' in data) || (data.motionPreset is string && data.motionPreset.size() <= 80))
+        && (!('bgPreset' in data) || (data.bgPreset is string && data.bgPreset.size() <= 80))
+        && isValidTimestamp(data.createdAt)
+        && isValidTimestamp(data.updatedAt);
+    }
+
+    // User profile access
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && incoming().userId == userId
+        && (!('subscriptionTier' in incoming()) || incoming().subscriptionTier == 'FREE')
+        && isValidUserProfile(incoming());
+
+      allow update: if isOwner(userId)
+        && isValidId(userId)
+        && isValidUserProfile(incoming())
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName', 'role', 'subscriptionTier', 'billingCycle',
+          'themePreference', 'aiCreditsRemaining', 'lastCreditResetDate',
+          'verifiedTransactionId', 'updatedAt'
+        ])
+        && (
+          !('subscriptionTier' in incoming())
+          || incoming().subscriptionTier == 'FREE'
+          || incoming().subscriptionTier == existing().get('subscriptionTier', 'FREE')
+          || (
+            'verifiedTransactionId' in incoming()
+            && isValidId(incoming().verifiedTransactionId)
+            && existsAfter(/databases/$(database)/documents/users/$(userId)/transactions/$(incoming().verifiedTransactionId))
+          )
+        );
+
+      allow delete: if false;
+
+      // User campaigns
+      match /campaigns/{campaignId} {
+        allow get: if isOwner(userId) && isValidId(campaignId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && isValidId(campaignId)
+          && incoming().userId == userId
+          && isValidAdCampaign(incoming());
+        allow update: if isOwner(userId)
+          && isValidId(campaignId)
+          && isValidAdCampaign(incoming())
+          && incoming().userId == existing().userId
+          && incoming().createdAt == existing().createdAt;
+        allow delete: if isOwner(userId) && isValidId(campaignId);
+      }
+
+      // Immutable verified payment transactions
+      match /transactions/{transactionId} {
+        allow get: if isOwner(userId) && isValidId(transactionId);
+        allow list: if isOwner(userId);
+        allow create: if isOwner(userId)
+          && isValidId(transactionId)
+          && incoming().userId == userId
+          && isValidSubscriptionTransaction(incoming());
+        allow update, delete: if false;
+      }
+    }
+  }
+}

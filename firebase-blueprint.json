@@ -1,0 +1,195 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile data stored for each authenticated creator",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Unique identifier of the authenticated user"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name"
+        },
+        "email": {
+          "type": "string",
+          "description": "User email address"
+        },
+        "role": {
+          "type": "string",
+          "description": "User creator role"
+        },
+        "subscriptionTier": {
+          "type": "string",
+          "enum": ["FREE", "BASIC", "PRO", "PREMIUM"],
+          "description": "User subscription tier: FREE, BASIC ($5/mo), PRO ($15/mo), or PREMIUM ($20/mo)"
+        },
+        "billingCycle": {
+          "type": "string",
+          "enum": ["MONTHLY", "YEARLY"],
+          "description": "Active billing cycle"
+        },
+        "themePreference": {
+          "type": "string",
+          "enum": ["DARK", "LIGHT"],
+          "description": "Creator UI theme preference synced across devices"
+        },
+        "aiCreditsRemaining": {
+          "type": "integer",
+          "description": "Remaining daily AI generation & Director sessions"
+        },
+        "lastCreditResetDate": {
+          "type": "string",
+          "description": "YYYY-MM-DD local/UTC date when daily credits were last allocated"
+        },
+        "verifiedTransactionId": {
+          "type": "string",
+          "description": "Document ID of the verified payment transaction authorizing a paid subscription"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp via serverTimestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update timestamp via serverTimestamp"
+        }
+      },
+      "required": ["userId", "displayName", "email", "role", "createdAt", "updatedAt"]
+    },
+    "SubscriptionTransaction": {
+      "title": "SubscriptionTransaction",
+      "description": "Immutable verified checkout transaction authorizing paid OmniStudio tiers",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Authenticated buyer user ID"
+        },
+        "planTier": {
+          "type": "string",
+          "enum": ["BASIC", "PRO", "PREMIUM"],
+          "description": "Purchased plan tier"
+        },
+        "billingCycle": {
+          "type": "string",
+          "enum": ["MONTHLY", "YEARLY"],
+          "description": "Billing cycle for the transaction"
+        },
+        "amountUsd": {
+          "type": "number",
+          "description": "Charged USD total"
+        },
+        "paymentMethod": {
+          "type": "string",
+          "description": "Verified payment instrument summary"
+        },
+        "paymentStatus": {
+          "type": "string",
+          "enum": ["VERIFIED"],
+          "description": "Verification status"
+        },
+        "transactionRef": {
+          "type": "string",
+          "description": "Unique gateway receipt reference"
+        },
+        "billingEmail": {
+          "type": "string",
+          "description": "Verified billing receipt email"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Transaction timestamp via serverTimestamp"
+        }
+      },
+      "required": ["userId", "planTier", "billingCycle", "amountUsd", "paymentMethod", "paymentStatus", "transactionRef", "billingEmail", "createdAt"]
+    },
+    "AdCampaign": {
+      "title": "AdCampaign",
+      "description": "Saved ad creative and video configuration project",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Creator user identifier"
+        },
+        "name": {
+          "type": "string",
+          "description": "Project campaign name"
+        },
+        "productName": {
+          "type": "string",
+          "description": "Selected product title"
+        },
+        "productPrice": {
+          "type": "string",
+          "description": "Product price string"
+        },
+        "category": {
+          "type": "string",
+          "description": "Product category"
+        },
+        "framework": {
+          "type": "string",
+          "description": "Applied ad framework formula"
+        },
+        "aspectRatio": {
+          "type": "string",
+          "description": "Aspect ratio tag"
+        },
+        "headline": {
+          "type": "string",
+          "description": "Headline text"
+        },
+        "cta": {
+          "type": "string",
+          "description": "Call to action text"
+        },
+        "motionPreset": {
+          "type": "string",
+          "description": "Selected motion graphics preset"
+        },
+        "bgPreset": {
+          "type": "string",
+          "description": "Selected background preset"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp via serverTimestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update timestamp via serverTimestamp"
+        }
+      },
+      "required": ["userId", "name", "productName", "productPrice", "framework", "aspectRatio", "headline", "cta", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Creator user profile document"
+    },
+    "/users/{userId}/campaigns/{campaignId}": {
+      "schema": {
+        "$ref": "#/entities/AdCampaign"
+      },
+      "description": "User ad campaigns and creative projects"
+    },
+    "/users/{userId}/transactions/{transactionId}": {
+      "schema": {
+        "$ref": "#/entities/SubscriptionTransaction"
+      },
+      "description": "Verified payment transactions for tiered subscriptions"
+    }
+  }
+}

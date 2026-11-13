@@ -1,0 +1,6 @@
+{
+  "name": "OmniStudio",
+  "description": "Multi-modal AI video creation and editing ecosystem by ENJEBEL TECH featuring Director Chat conversational editing, Muse AI Video Engine, CapCut-style multi-track timeline, Photo-to-Ad converter, and tiered cloud sync.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
