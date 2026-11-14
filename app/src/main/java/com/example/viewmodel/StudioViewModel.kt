@@ -11,6 +11,7 @@ import com.example.R
 import com.example.ai.OmniAiEngine
 import com.example.audio.StudioAudioEngine
 import com.example.data.model.FirestoreCampaign
+import com.example.data.repository.CheckoutLaunchMode
 import com.example.data.repository.CheckoutSessionInit
 import com.example.data.repository.FirestoreRepository
 import com.example.data.repository.PaymentGatewayRepository
@@ -153,6 +154,7 @@ data class StudioUiState(
     val paymentError: String? = null,
     val selectedPaymentProvider: PaymentProvider = PaymentProvider.STRIPE,
     val activeCheckoutSession: CheckoutSessionInit? = null,
+    val activeInlineWebViewSession: CheckoutSessionInit? = null,
     val checkoutStatusBanner: String? = null,
 
     // Video Background Removal Studio
@@ -1567,6 +1569,20 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
     fun isPaymentBackendConfigured(): Boolean = paymentGatewayRepo.isBackendConfigured()
 
+    fun isFlutterwaveDirectConfigured(): Boolean = paymentGatewayRepo.isFlutterwaveDirectConfigured()
+
+    fun isStripePaymentLinkConfigured(): Boolean = paymentGatewayRepo.isStripePaymentLinkConfigured()
+
+    fun dismissFlutterwaveInlineModal() {
+        _uiState.update {
+            it.copy(
+                activeInlineWebViewSession = null,
+                isProcessingPayment = false,
+                checkoutStatusBanner = null
+            )
+        }
+    }
+
     fun initiatePlanCheckout(
         plan: SubscriptionPlan,
         billingCycle: BillingCycle,
@@ -1592,25 +1608,39 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             )
         }
 
+        val customerName = _uiState.value.user.name
         viewModelScope.launch {
             val sessionResult = paymentGatewayRepo.createCheckoutSession(
                 userId = uid,
                 email = billingEmail,
                 plan = plan,
                 billingCycle = billingCycle,
-                provider = provider
+                provider = provider,
+                customerName = customerName
             )
 
             sessionResult.fold(
                 onSuccess = { session ->
-                    _uiState.update {
-                        it.copy(
-                            isProcessingPayment = false,
-                            activeCheckoutSession = session,
-                            checkoutStatusBanner = "${provider.displayName} checkout open. Complete payment to unlock ${plan.badgeTitle} instantly."
-                        )
+                    if (session.launchMode == CheckoutLaunchMode.FLUTTERWAVE_INLINE_WEBVIEW) {
+                        _uiState.update {
+                            it.copy(
+                                isProcessingPayment = false,
+                                activeInlineWebViewSession = session,
+                                activeCheckoutSession = null,
+                                checkoutStatusBanner = "Flutterwave checkout open. Complete payment to unlock ${plan.badgeTitle}."
+                            )
+                        }
+                    } else {
+                        _uiState.update {
+                            it.copy(
+                                isProcessingPayment = false,
+                                activeCheckoutSession = session,
+                                activeInlineWebViewSession = null,
+                                checkoutStatusBanner = "${provider.displayName} checkout open. Complete payment to unlock ${plan.badgeTitle} instantly."
+                            )
+                        }
+                        onLaunchCheckoutUrl(session.checkoutUrl)
                     }
-                    onLaunchCheckoutUrl(session.checkoutUrl)
                     onResult(true, session.sessionId)
                 },
                 onFailure = { error ->
@@ -1624,6 +1654,102 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     }
                     onResult(false, errText)
                 }
+            )
+        }
+    }
+
+    fun handleFlutterwaveInlineSuccess(
+        session: CheckoutSessionInit,
+        status: String,
+        transactionId: String,
+        txRef: String,
+        onComplete: (Boolean, String?) -> Unit = { _, _ -> }
+    ) {
+        val uid = try { Firebase.auth.currentUser?.uid } catch (_: Exception) { null }
+        if (uid == null) {
+            val errMsg = "Authenticated account required to activate subscription."
+            _uiState.update {
+                it.copy(
+                    activeInlineWebViewSession = null,
+                    isProcessingPayment = false,
+                    paymentError = errMsg
+                )
+            }
+            onComplete(false, errMsg)
+            return
+        }
+
+        val normalizedStatus = status.trim().lowercase(java.util.Locale.US)
+        val isSuccess = normalizedStatus in setOf("successful", "completed", "paid", "succeeded", "success")
+        if (!isSuccess) {
+            val errMsg = "Flutterwave payment returned status \"$status\". Please try again."
+            _uiState.update {
+                it.copy(
+                    activeInlineWebViewSession = null,
+                    isProcessingPayment = false,
+                    paymentError = errMsg,
+                    checkoutStatusBanner = null
+                )
+            }
+            onComplete(false, errMsg)
+            return
+        }
+
+        val rawRef = transactionId.ifBlank { txRef }.ifBlank { session.sessionId }
+        val safeRef = ("flw_${rawRef}_${session.sessionId}").take(100).let {
+            if (it.length < 6) "flw_tx_$it" else it
+        }
+
+        _uiState.update {
+            it.copy(
+                activeInlineWebViewSession = null,
+                isProcessingPayment = true,
+                paymentError = null,
+                checkoutStatusBanner = "Confirming Flutterwave payment receipt..."
+            )
+        }
+
+        if (paymentGatewayRepo.isBackendConfigured()) {
+            viewModelScope.launch {
+                val verifyRes = paymentGatewayRepo.verifyCheckoutSession(
+                    userId = uid,
+                    sessionId = session.sessionId,
+                    provider = PaymentProvider.FLUTTERWAVE,
+                    expectedPlan = session.plan,
+                    expectedCycle = session.billingCycle
+                )
+                verifyRes.fold(
+                    onSuccess = { verification ->
+                        if (verification.verified) {
+                            completeVerifiedSubscription(
+                                plan = verification.plan,
+                                billingCycle = verification.billingCycle,
+                                paymentMethod = "Flutterwave Checkout",
+                                billingEmail = session.billingEmail,
+                                externalTransactionRef = verification.transactionRef.ifBlank { safeRef },
+                                onComplete = onComplete
+                            )
+                        } else {
+                            val pendingMsg = verification.message ?: "Flutterwave verification pending."
+                            _uiState.update { it.copy(isProcessingPayment = false, paymentError = pendingMsg) }
+                            onComplete(false, pendingMsg)
+                        }
+                    },
+                    onFailure = { err ->
+                        val msg = err.localizedMessage ?: "Flutterwave backend verification failed."
+                        _uiState.update { it.copy(isProcessingPayment = false, paymentError = msg) }
+                        onComplete(false, msg)
+                    }
+                )
+            }
+        } else {
+            completeVerifiedSubscription(
+                plan = session.plan,
+                billingCycle = session.billingCycle,
+                paymentMethod = "Flutterwave Checkout",
+                billingEmail = session.billingEmail,
+                externalTransactionRef = safeRef,
+                onComplete = onComplete
             )
         }
     }
@@ -1683,6 +1809,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
             _uiState.update {
                 it.copy(
                     isProcessingPayment = false,
+                    activeInlineWebViewSession = null,
                     paymentError = "Checkout was cancelled before payment completed.",
                     checkoutStatusBanner = null
                 )
@@ -1692,12 +1819,14 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         val uid = try { Firebase.auth.currentUser?.uid } catch (_: Exception) { null } ?: return
-        val activeSession = _uiState.value.activeCheckoutSession
+        val activeSession = _uiState.value.activeCheckoutSession ?: _uiState.value.activeInlineWebViewSession
         val plan = callback.plan ?: activeSession?.plan ?: return
         val cycle = callback.billingCycle ?: activeSession?.billingCycle ?: BillingCycle.MONTHLY
         val provider = callback.provider ?: activeSession?.provider ?: _uiState.value.selectedPaymentProvider
         val sessionId = callback.sessionId.ifBlank { activeSession?.sessionId.orEmpty() }
         val email = _uiState.value.user.email.ifBlank { activeSession?.billingEmail.orEmpty() }
+
+        _uiState.update { it.copy(activeInlineWebViewSession = null) }
 
         if (sessionId.isNotBlank() && paymentGatewayRepo.isBackendConfigured()) {
             _uiState.update {
@@ -1734,12 +1863,15 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 )
             }
         } else if (callback.isSuccessful && callback.transactionRef.isNotBlank()) {
+            val safeRef = callback.transactionRef.let { ref ->
+                if (ref.length < 6) "gw_ref_$ref" else ref.take(120)
+            }
             completeVerifiedSubscription(
                 plan = plan,
                 billingCycle = cycle,
                 paymentMethod = "${provider.displayName} Webhook",
                 billingEmail = email,
-                externalTransactionRef = callback.transactionRef,
+                externalTransactionRef = safeRef,
                 onComplete = onComplete
             )
         }
@@ -1789,6 +1921,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                             isProcessingPayment = false,
                             paymentError = null,
                             activeCheckoutSession = null,
+                            activeInlineWebViewSession = null,
                             checkoutStatusBanner = "${plan.badgeTitle} activated!",
                             user = state.user.copy(
                                 subscriptionTier = plan.id,
@@ -1826,6 +1959,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 showProUpgradeModal = false,
                 paywallReason = null,
                 activeCheckoutSession = null,
+                activeInlineWebViewSession = null,
                 paymentError = null,
                 user = state.user.copy(
                     subscriptionTier = SubscriptionPlan.FREE.id,

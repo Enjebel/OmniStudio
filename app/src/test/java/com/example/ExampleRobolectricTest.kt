@@ -4,6 +4,8 @@ import android.app.Application
 import android.content.Context
 import android.net.Uri
 import androidx.test.core.app.ApplicationProvider
+import com.example.data.repository.CheckoutLaunchMode
+import com.example.data.repository.CheckoutSessionInit
 import com.example.data.repository.PaymentGatewayRepository
 import com.example.data.repository.PaymentProvider
 import com.example.model.AspectRatioOption
@@ -214,10 +216,14 @@ class ExampleRobolectricTest {
   fun paymentGatewayDeepLinkAndCheckoutRouting() {
     val gateway = PaymentGatewayRepository()
 
-    // Placeholder / unset PAYMENT_BACKEND_URL is safely reported as unconfigured
+    // Placeholder / unset PAYMENT_BACKEND_URL & serverless provider keys are safely reported
     assertFalse(gateway.isBackendConfigured())
     assertFalse(gateway.hasProviderPublicKey(PaymentProvider.STRIPE))
     assertFalse(gateway.hasProviderPublicKey(PaymentProvider.FLUTTERWAVE))
+    assertFalse(gateway.isStripePaymentLinkConfigured())
+    assertFalse(gateway.isFlutterwaveDirectConfigured())
+    assertFalse(gateway.isProviderReady(PaymentProvider.STRIPE))
+    assertFalse(gateway.isProviderReady(PaymentProvider.FLUTTERWAVE))
 
     // Valid Stripe & Flutterwave callback URI parsing
     val stripeSuccessUri = Uri.parse(
@@ -232,6 +238,17 @@ class ExampleRobolectricTest {
     assertEquals(SubscriptionPlan.PRO, parsedSuccess.plan)
     assertEquals(BillingCycle.YEARLY, parsedSuccess.billingCycle)
     assertEquals(PaymentProvider.STRIPE, parsedSuccess.provider)
+
+    // Flutterwave redirect URI parsing with tx_ref fallback & completed status
+    val flwTxRefUri = Uri.parse(
+      "omnistudio://checkout/callback?status=completed&tx_ref=omni_pro_abc123456&transaction_id=987654&plan=PRO&cycle=MONTHLY&provider=FLUTTERWAVE"
+    )
+    val parsedFlw = gateway.parseDeepLinkCallback(flwTxRefUri)
+    assertNotNull(parsedFlw)
+    assertTrue(parsedFlw!!.isSuccessful)
+    assertEquals("omni_pro_abc123456", parsedFlw.sessionId)
+    assertEquals("omni_pro_abc123456", parsedFlw.transactionRef)
+    assertEquals(PaymentProvider.FLUTTERWAVE, parsedFlw.provider)
 
     val flutterwaveCancelUri = Uri.parse(
       "omnistudio://checkout/callback?status=cancelled&plan=PREMIUM&cycle=MONTHLY&provider=FLUTTERWAVE"
@@ -253,6 +270,9 @@ class ExampleRobolectricTest {
     assertEquals(PaymentProvider.STRIPE, vm.uiState.value.selectedPaymentProvider)
     vm.selectPaymentProvider(PaymentProvider.FLUTTERWAVE)
     assertEquals(PaymentProvider.FLUTTERWAVE, vm.uiState.value.selectedPaymentProvider)
+    assertFalse(vm.isPaymentBackendConfigured())
+    assertFalse(vm.isFlutterwaveDirectConfigured())
+    assertFalse(vm.isStripePaymentLinkConfigured())
 
     var launchedUrl: String? = null
     var initOk = true
@@ -271,6 +291,37 @@ class ExampleRobolectricTest {
     assertEquals(null, launchedUrl)
     assertNotNull(initMsg)
     assertNotNull(vm.uiState.value.paymentError)
+
+    // Inline Flutterwave WebView handler enforces authenticated Firebase session
+    val sampleFlwSession = CheckoutSessionInit(
+      sessionId = "omni_pro_test123",
+      checkoutUrl = "https://checkout.flutterwave.com/v3.js",
+      provider = PaymentProvider.FLUTTERWAVE,
+      plan = SubscriptionPlan.PRO,
+      billingCycle = BillingCycle.MONTHLY,
+      amountUsd = 15.0,
+      billingEmail = "enjebeln@gmail.com",
+      launchMode = CheckoutLaunchMode.FLUTTERWAVE_INLINE_WEBVIEW,
+      inlinePublicKey = "FLWPUBK_TEST-demo"
+    )
+    var inlineOk = true
+    var inlineMsg: String? = null
+    vm.handleFlutterwaveInlineSuccess(
+      session = sampleFlwSession,
+      status = "successful",
+      transactionId = "1234567",
+      txRef = "omni_pro_test123"
+    ) { ok, msg ->
+      inlineOk = ok
+      inlineMsg = msg
+    }
+    assertFalse(inlineOk)
+    assertNotNull(inlineMsg)
+    assertEquals(null, vm.uiState.value.activeInlineWebViewSession)
+
+    vm.dismissFlutterwaveInlineModal()
+    assertEquals(null, vm.uiState.value.activeInlineWebViewSession)
+    assertFalse(vm.uiState.value.isProcessingPayment)
 
     // Cancelled deep link clears processing state and records cancellation error
     var cancelOk = true

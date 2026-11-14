@@ -99,6 +99,7 @@ import com.example.ui.components.BatchCreatorPanel
 import com.example.ui.components.BgRemovalScreen
 import com.example.ui.components.DirectorChatScreen
 import com.example.ui.components.ExportDialog
+import com.example.ui.components.FlutterwaveCheckoutModal
 import com.example.ui.components.HistoryPanel
 import com.example.ui.components.LayerManagerPanel
 import com.example.ui.components.MotionTemplatePanel
@@ -621,6 +622,8 @@ fun OmniStudioApp(
                 selectedProvider = state.selectedPaymentProvider,
                 activeCheckoutSession = state.activeCheckoutSession,
                 isPaymentBackendConfigured = viewModel.isPaymentBackendConfigured(),
+                isFlutterwaveConfigured = viewModel.isFlutterwaveDirectConfigured(),
+                isStripeLinkConfigured = viewModel.isStripePaymentLinkConfigured(),
                 onSelectProvider = { provider -> viewModel.selectPaymentProvider(provider) },
                 onStartPlanCheckout = { plan, cycle, provider, email ->
                     viewModel.initiatePlanCheckout(
@@ -650,6 +653,38 @@ fun OmniStudioApp(
                     Toast.makeText(context, "Switched to Free Tier.", Toast.LENGTH_SHORT).show()
                 },
                 onDismiss = { viewModel.dismissProUpgradeModal() }
+            )
+        }
+
+        // In-App Flutterwave Inline v3 WebView Checkout Modal
+        val inlineWebSession = state.activeInlineWebViewSession
+        if (inlineWebSession != null) {
+            FlutterwaveCheckoutModal(
+                session = inlineWebSession,
+                onPaymentCompleted = { status, txId, txRef ->
+                    viewModel.handleFlutterwaveInlineSuccess(
+                        session = inlineWebSession,
+                        status = status,
+                        transactionId = txId,
+                        txRef = txRef
+                    ) { success, msg ->
+                        Toast.makeText(
+                            context,
+                            if (success) "${inlineWebSession.plan.badgeTitle} unlocked!" else (msg ?: "Payment could not be completed."),
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                },
+                onDeepLinkIntercepted = { uri ->
+                    viewModel.handleCheckoutCallbackUri(uri) { success, msg ->
+                        Toast.makeText(
+                            context,
+                            if (success) "Subscription verified & unlocked!" else (msg ?: "Payment verification pending."),
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                },
+                onDismiss = { viewModel.dismissFlutterwaveInlineModal() }
             )
         }
     }

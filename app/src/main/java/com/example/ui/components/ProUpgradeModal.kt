@@ -87,6 +87,8 @@ fun ProUpgradeModal(
     selectedProvider: PaymentProvider,
     activeCheckoutSession: CheckoutSessionInit?,
     isPaymentBackendConfigured: Boolean,
+    isFlutterwaveConfigured: Boolean = false,
+    isStripeLinkConfigured: Boolean = false,
     onSelectProvider: (PaymentProvider) -> Unit,
     onStartPlanCheckout: (
         plan: SubscriptionPlan,
@@ -367,7 +369,11 @@ fun ProUpgradeModal(
                             )
                         }
                         Text(
-                            text = "Complete payment in your browser. Once webhook confirms, your account unlocks automatically — or tap Verify below.",
+                            text = if (isPaymentBackendConfigured) {
+                                "Complete payment in your browser. Once webhook confirms, your account unlocks automatically — or tap Verify below."
+                            } else {
+                                "Complete payment in your browser. When payment succeeds, your checkout redirect will unlock your account."
+                            },
                             color = TextSecondary,
                             style = MaterialTheme.typography.bodyMedium
                         )
@@ -386,25 +392,27 @@ fun ProUpgradeModal(
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text("Open Page", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                             }
-                            Button(
-                                onClick = onVerifyPendingCheckout,
-                                enabled = !isProcessingPayment,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(44.dp)
-                                    .testTag("verify_pending_checkout_btn"),
-                                shape = RoundedCornerShape(10.dp),
-                                colors = ButtonDefaults.buttonColors(containerColor = palette.accentCyan)
-                            ) {
-                                Icon(Icons.Default.Refresh, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Verify Status", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            if (isPaymentBackendConfigured) {
+                                Button(
+                                    onClick = onVerifyPendingCheckout,
+                                    enabled = !isProcessingPayment,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(44.dp)
+                                        .testTag("verify_pending_checkout_btn"),
+                                    shape = RoundedCornerShape(10.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = palette.accentCyan)
+                                ) {
+                                    Icon(Icons.Default.Refresh, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Verify Status", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
                             }
                         }
                     }
                 }
 
-                // Inline Validation / Payment Error or Backend Configuration Guidance
+                // Inline Validation / Payment Error or Provider-Specific Configuration Status
                 val combinedError = localValidationError ?: paymentError
                 if (combinedError != null) {
                     Spacer(modifier = Modifier.height(10.dp))
@@ -421,22 +429,54 @@ fun ProUpgradeModal(
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(combinedError, color = palette.onErrorContainer, style = MaterialTheme.typography.bodyMedium)
                     }
-                } else if (!isPaymentBackendConfigured) {
+                } else {
+                    val isProviderReady = when (selectedProvider) {
+                        PaymentProvider.FLUTTERWAVE -> isPaymentBackendConfigured || isFlutterwaveConfigured
+                        PaymentProvider.STRIPE -> isPaymentBackendConfigured || isStripeLinkConfigured
+                    }
+                    val statusText = when {
+                        selectedProvider == PaymentProvider.FLUTTERWAVE && isPaymentBackendConfigured ->
+                            "Flutterwave server checkout ready."
+                        selectedProvider == PaymentProvider.FLUTTERWAVE && isFlutterwaveConfigured ->
+                            "Flutterwave Inline v3 ready • Opens secure in-app checkout (no backend server required)."
+                        selectedProvider == PaymentProvider.FLUTTERWAVE ->
+                            "Add FLUTTERWAVE_PUBLIC_KEY (no backend needed) or PAYMENT_BACKEND_URL in the AI Studio Secrets panel."
+                        selectedProvider == PaymentProvider.STRIPE && isPaymentBackendConfigured ->
+                            "Stripe server checkout ready."
+                        selectedProvider == PaymentProvider.STRIPE && isStripeLinkConfigured ->
+                            "Stripe Payment Link ready • Opens hosted checkout in browser."
+                        else ->
+                            "Add PAYMENT_BACKEND_URL or STRIPE_PAYMENT_LINK_URL in the AI Studio Secrets panel to route Stripe checkouts."
+                    }
+
                     Spacer(modifier = Modifier.height(10.dp))
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(12.dp))
-                            .background(StudioSurfaceElevated)
-                            .border(1.dp, StudioBorder, RoundedCornerShape(12.dp))
-                            .padding(10.dp),
+                            .background(
+                                if (isProviderReady) CyberGreen.copy(alpha = 0.10f)
+                                else StudioSurfaceElevated
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = if (isProviderReady) CyberGreen.copy(alpha = 0.45f) else StudioBorder,
+                                shape = RoundedCornerShape(12.dp)
+                            )
+                            .padding(10.dp)
+                            .testTag("provider_config_status_banner"),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.Default.Info, contentDescription = null, tint = palette.accentCyan, modifier = Modifier.size(16.dp))
+                        Icon(
+                            imageVector = if (isProviderReady) Icons.Default.CheckCircle else Icons.Default.Info,
+                            contentDescription = null,
+                            tint = if (isProviderReady) CyberGreen else palette.accentCyan,
+                            modifier = Modifier.size(16.dp)
+                        )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Set PAYMENT_BACKEND_URL and Stripe/Flutterwave keys in the AI Studio Secrets panel to route live checkouts.",
-                            color = TextSecondary,
+                            text = statusText,
+                            color = if (isProviderReady) TextPrimary else TextSecondary,
                             fontSize = 11.sp,
                             lineHeight = 15.sp
                         )
