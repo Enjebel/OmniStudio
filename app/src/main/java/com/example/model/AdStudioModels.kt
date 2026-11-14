@@ -28,6 +28,96 @@ enum class TextAnimationType(val title: String) {
     FADE_SLIDE("Fade & Slide")
 }
 
+enum class ColorFilterPreset(
+    val title: String,
+    val subtitle: String,
+    val cssFilterSpec: String,
+    val brightness: Float,
+    val contrast: Float,
+    val saturation: Float,
+    val sepia: Float,
+    val warmth: Float,
+    val accentHex: Long
+) {
+    NONE(
+        title = "Original",
+        subtitle = "Clean neutral studio capture",
+        cssFilterSpec = "filter: none;",
+        brightness = 1.0f,
+        contrast = 1.0f,
+        saturation = 1.0f,
+        sepia = 0.0f,
+        warmth = 0.0f,
+        accentHex = 0xFF64748B
+    ),
+    CINEMATIC(
+        title = "Cinematic",
+        subtitle = "Rich film contrast & warm shadows",
+        cssFilterSpec = "filter: contrast(1.18) saturate(1.12) brightness(0.95) sepia(0.12);",
+        brightness = 0.95f,
+        contrast = 1.18f,
+        saturation = 1.12f,
+        sepia = 0.12f,
+        warmth = 0.08f,
+        accentHex = 0xFFF59E0B
+    ),
+    VIBRANT(
+        title = "Vibrant",
+        subtitle = "High-saturation commercial punch",
+        cssFilterSpec = "filter: contrast(1.14) saturate(1.52) brightness(1.06);",
+        brightness = 1.06f,
+        contrast = 1.14f,
+        saturation = 1.52f,
+        sepia = 0.0f,
+        warmth = 0.04f,
+        accentHex = 0xFF06B6D4
+    ),
+    VINTAGE(
+        title = "Vintage",
+        subtitle = "Warm retro analog film fade",
+        cssFilterSpec = "filter: sepia(0.45) contrast(0.92) saturate(0.82) brightness(1.04);",
+        brightness = 1.04f,
+        contrast = 0.92f,
+        saturation = 0.82f,
+        sepia = 0.45f,
+        warmth = 0.18f,
+        accentHex = 0xFFD97706
+    ),
+    NOIR_MONO(
+        title = "Noir B&W",
+        subtitle = "Crisp editorial monochrome",
+        cssFilterSpec = "filter: grayscale(1) contrast(1.32) brightness(0.96);",
+        brightness = 0.96f,
+        contrast = 1.32f,
+        saturation = 0.0f,
+        sepia = 0.0f,
+        warmth = 0.0f,
+        accentHex = 0xFF94A3B8
+    ),
+    GOLDEN_HOUR(
+        title = "Golden Hour",
+        subtitle = "Luxury sunlit amber radiance",
+        cssFilterSpec = "filter: saturate(1.26) brightness(1.05) sepia(0.22) contrast(1.08);",
+        brightness = 1.05f,
+        contrast = 1.08f,
+        saturation = 1.26f,
+        sepia = 0.22f,
+        warmth = 0.24f,
+        accentHex = 0xFFFBBF24
+    ),
+    CYBER_COOL(
+        title = "Cyber Cool",
+        subtitle = "Sharp cool tones & neon edge",
+        cssFilterSpec = "filter: contrast(1.20) saturate(1.30) brightness(1.02);",
+        brightness = 1.02f,
+        contrast = 1.20f,
+        saturation = 1.30f,
+        sepia = 0.0f,
+        warmth = -0.18f,
+        accentHex = 0xFF8B5CF6
+    )
+}
+
 data class CanvasLayer(
     val id: String,
     val name: String,
@@ -59,6 +149,8 @@ data class CanvasLayer(
     val customImageUri: String? = null,
     val aiBitmap: Bitmap? = null,
     val isCutoutApplied: Boolean = false,
+    val colorFilter: ColorFilterPreset = ColorFilterPreset.NONE,
+    val filterIntensity: Float = 1.0f,
 
     // Badge specific properties
     val badgeLabel: String = "50% OFF",
@@ -107,6 +199,22 @@ enum class TimelineTrackType(val trackName: String, val color: Color) {
     EFFECT("AI FX & Motion", Color(0xFFEC4899))
 }
 
+enum class TransitionEffect(
+    val title: String,
+    val subtitle: String,
+    val badge: String,
+    val category: String,
+    val defaultDurationSec: Float
+) {
+    NONE("No Transition", "Hard straight cut between clips", "Cut", "Basic", 0f),
+    FADE("Crossfade", "Smooth opacity dissolve between clips", "Fade", "Smooth", 0.6f),
+    SLIDE_LEFT("Slide Left", "Horizontal swipe reveal left", "Slide", "Dynamic", 0.5f),
+    SLIDE_UP("Slide Up", "Vertical upward curtain push", "Slide Up", "Dynamic", 0.5f),
+    ZOOM_IN("Zoom Punch", "High-energy scale burst in", "Zoom", "Viral", 0.45f),
+    WHIP_PAN("Whip Pan", "Fast camera whip & subtle tilt", "Whip", "Viral", 0.4f),
+    FLASH_CUT("Flash Cut", "Electric strobe flash dissolve", "Flash", "SFX", 0.35f)
+}
+
 data class TimelineClip(
     val id: String,
     val trackType: TimelineTrackType,
@@ -115,7 +223,9 @@ data class TimelineClip(
     val durationSec: Float,
     val isMuted: Boolean = false,
     val isAiGenerated: Boolean = false,
-    val audioCue: String = ""
+    val audioCue: String = "",
+    val transitionIn: TransitionEffect = TransitionEffect.NONE,
+    val transitionDurationSec: Float = 0.6f
 )
 
 enum class AudioTrackOption(val title: String, val genre: String, val bpm: Int, val durationSec: Float) {

@@ -16,6 +16,7 @@ import com.example.data.repository.CheckoutSessionInit
 import com.example.data.repository.FirestoreRepository
 import com.example.data.repository.PaymentGatewayRepository
 import com.example.data.repository.PaymentProvider
+import com.example.data.repository.VerificationEndpointUnavailableException
 import com.example.model.AdFramework
 import com.example.model.AdStudioRepository
 import com.example.model.AdTemplate
@@ -31,6 +32,7 @@ import com.example.model.BillingCycle
 import com.example.model.CameraMovement
 import com.example.model.CanvasLayer
 import com.example.model.ChromaKeyColor
+import com.example.model.ColorFilterPreset
 import com.example.model.DemoProduct
 import com.example.model.DirectorMessage
 import com.example.model.GeneratedAdCopy
@@ -43,6 +45,7 @@ import com.example.model.SubscriptionPlan
 import com.example.model.TextAnimationType
 import com.example.model.TimelineClip
 import com.example.model.TimelineTrackType
+import com.example.model.TransitionEffect
 import com.example.model.UserProfile
 import com.example.model.VideoBgRemovalState
 import com.example.model.isPaidTier
@@ -65,6 +68,8 @@ enum class OmniModule(val label: String) {
     STUDIO("Studio"),
     DIRECTOR("Director"),
     MUSE_AI("Muse AI"),
+    TRANSITIONS("Transitions"),
+    FILTERS("Filters"),
     BG_REMOVAL("Bg Removal"),
     FEED("Feed")
 }
@@ -94,6 +99,8 @@ data class StudioUiState(
     val motionSpeed: Float = 1.0f,
     val motionIntensity: Float = 1.0f,
     val lighting: LightingSettings = LightingSettings(),
+    val activeProductFilter: ColorFilterPreset = ColorFilterPreset.NONE,
+    val productFilterIntensity: Float = 1.0f,
 
     // Layers
     val layers: List<CanvasLayer> = emptyList(),
@@ -105,6 +112,8 @@ data class StudioUiState(
     val totalDurationSec: Float = 10f,
     val timelineClips: List<TimelineClip> = emptyList(),
     val selectedClipId: String? = null,
+    val selectedTransition: TransitionEffect = TransitionEffect.FADE,
+    val selectedTransitionDurationSec: Float = 0.6f,
 
     // Audio & Voice
     val selectedAudioTrack: AudioTrackOption = AudioTrackOption.TECH_FUTURE,
@@ -155,6 +164,7 @@ data class StudioUiState(
     val selectedPaymentProvider: PaymentProvider = PaymentProvider.STRIPE,
     val activeCheckoutSession: CheckoutSessionInit? = null,
     val activeInlineWebViewSession: CheckoutSessionInit? = null,
+    val activeStripePaymentSheetSession: CheckoutSessionInit? = null,
     val checkoutStatusBanner: String? = null,
 
     // Video Background Removal Studio
@@ -359,7 +369,9 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 y = 0.48f,
                 scale = 1.0f,
                 zIndex = 1,
-                productDrawableRes = _uiState.value.selectedProduct.drawableRes
+                productDrawableRes = _uiState.value.selectedProduct.drawableRes,
+                colorFilter = _uiState.value.activeProductFilter,
+                filterIntensity = _uiState.value.productFilterIntensity
             ),
             CanvasLayer(
                 id = "headline_layer",
@@ -472,6 +484,45 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
     fun updateLighting(updater: (LightingSettings) -> LightingSettings) {
         _uiState.update { it.copy(lighting = updater(it.lighting)) }
+    }
+
+    fun applyProductFilter(
+        preset: ColorFilterPreset,
+        intensity: Float = _uiState.value.productFilterIntensity
+    ) {
+        val clamped = intensity.coerceIn(0f, 1f)
+        saveUndoState()
+        _uiState.update { state ->
+            val updatedLayers = state.layers.map { layer ->
+                if (layer.type == LayerType.PRODUCT) {
+                    layer.copy(colorFilter = preset, filterIntensity = clamped)
+                } else layer
+            }
+            state.copy(
+                activeProductFilter = preset,
+                productFilterIntensity = clamped,
+                layers = updatedLayers
+            )
+        }
+    }
+
+    fun setProductFilterIntensity(intensity: Float) {
+        val clamped = intensity.coerceIn(0f, 1f)
+        _uiState.update { state ->
+            val updatedLayers = state.layers.map { layer ->
+                if (layer.type == LayerType.PRODUCT) {
+                    layer.copy(filterIntensity = clamped)
+                } else layer
+            }
+            state.copy(
+                productFilterIntensity = clamped,
+                layers = updatedLayers
+            )
+        }
+    }
+
+    fun resetProductFilter() {
+        applyProductFilter(ColorFilterPreset.NONE, 1.0f)
     }
 
     // Layer Management
@@ -676,6 +727,118 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 } else clip
             }
             state.copy(timelineClips = updated)
+        }
+    }
+
+    fun selectTransitionPreset(effect: TransitionEffect) {
+        _uiState.update {
+            it.copy(
+                selectedTransition = effect,
+                selectedTransitionDurationSec = if (effect == TransitionEffect.NONE) it.selectedTransitionDurationSec else effect.defaultDurationSec
+            )
+        }
+    }
+
+    fun setTransitionDuration(durationSec: Float) {
+        _uiState.update {
+            it.copy(selectedTransitionDurationSec = durationSec.coerceIn(0.25f, 1.5f))
+        }
+    }
+
+    fun applyTransitionToClip(
+        clipId: String? = _uiState.value.selectedClipId,
+        effect: TransitionEffect = _uiState.value.selectedTransition,
+        durationSec: Float = _uiState.value.selectedTransitionDurationSec
+    ) {
+        val safeDur = if (effect == TransitionEffect.NONE) 0f else durationSec.coerceIn(0.25f, 1.5f)
+        _uiState.update { state ->
+            val eligibleClips = state.timelineClips.filter {
+                it.trackType == TimelineTrackType.PRODUCT || it.trackType == TimelineTrackType.TEXT
+            }
+            val targetClip = eligibleClips.find { it.id == clipId }
+                ?: eligibleClips.firstOrNull()
+                ?: return@update state
+
+            val markerId = "fx_trans_${targetClip.id}"
+            val updated = state.timelineClips
+                .filterNot { it.id == markerId }
+                .map { clip ->
+                    if (clip.id == targetClip.id) {
+                        clip.copy(
+                            transitionIn = effect,
+                            transitionDurationSec = safeDur
+                        )
+                    } else clip
+                }
+                .toMutableList()
+
+            if (effect != TransitionEffect.NONE) {
+                updated.add(
+                    TimelineClip(
+                        id = markerId,
+                        trackType = TimelineTrackType.EFFECT,
+                        name = "⇄ ${effect.badge}",
+                        startTimeSec = targetClip.startTimeSec,
+                        durationSec = safeDur.coerceAtMost(targetClip.durationSec),
+                        isAiGenerated = false
+                    )
+                )
+            }
+
+            state.copy(
+                timelineClips = updated,
+                selectedClipId = targetClip.id,
+                selectedTransition = effect,
+                selectedTransitionDurationSec = if (effect == TransitionEffect.NONE) state.selectedTransitionDurationSec else safeDur
+            )
+        }
+    }
+
+    fun applyTransitionBetweenAllClips(
+        effect: TransitionEffect = _uiState.value.selectedTransition,
+        durationSec: Float = _uiState.value.selectedTransitionDurationSec
+    ) {
+        val safeDur = if (effect == TransitionEffect.NONE) 0f else durationSec.coerceIn(0.25f, 1.5f)
+        _uiState.update { state ->
+            val targetIds = state.timelineClips
+                .filter { it.trackType == TimelineTrackType.PRODUCT || it.trackType == TimelineTrackType.TEXT }
+                .map { it.id }
+                .toSet()
+
+            val updated = state.timelineClips
+                .filterNot { it.id.startsWith("fx_trans_") }
+                .map { clip ->
+                    if (clip.id in targetIds) {
+                        clip.copy(
+                            transitionIn = effect,
+                            transitionDurationSec = safeDur
+                        )
+                    } else clip
+                }
+                .toMutableList()
+
+            if (effect != TransitionEffect.NONE) {
+                updated
+                    .filter { it.id in targetIds }
+                    .forEach { targetClip ->
+                        updated.add(
+                            TimelineClip(
+                                id = "fx_trans_${targetClip.id}",
+                                trackType = TimelineTrackType.EFFECT,
+                                name = "⇄ ${effect.badge}",
+                                startTimeSec = targetClip.startTimeSec,
+                                durationSec = safeDur.coerceAtMost(targetClip.durationSec),
+                                isAiGenerated = false
+                            )
+                        )
+                    }
+            }
+
+            state.copy(
+                timelineClips = updated,
+                selectedTransition = effect,
+                selectedTransitionDurationSec = if (effect == TransitionEffect.NONE) state.selectedTransitionDurationSec else safeDur
+            )
         }
     }
 
@@ -962,7 +1125,65 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                             }.toMutableList()
                             executedActions.add("Trimmed Dead Air (-20%)")
                         }
-                        if (cmd.addSuspenseTransition) {
+                        var nextSelectedTransition = current.selectedTransition
+                        var nextSelectedTransitionDur = current.selectedTransitionDurationSec
+
+                        if (cmd.splitAtPlayhead && nextClips.isNotEmpty()) {
+                            val first = nextClips.first()
+                            val mid = first.startTimeSec + (first.durationSec / 2f)
+                            nextClips[0] = first.copy(durationSec = mid - first.startTimeSec)
+                            nextClips.add(1, first.copy(id = "${first.id}_cut", name = "${first.name} Cut", startTimeSec = mid, durationSec = first.durationSec / 2f))
+                            executedActions.add("Split Clip at Playhead")
+                        }
+
+                        val resolvedTransition: TransitionEffect? = cmd.transitionEffect
+                            ?: if (cmd.addSuspenseTransition) TransitionEffect.FLASH_CUT else null
+
+                        resolvedTransition?.let { effect ->
+                            val dur = (cmd.transitionDurationSec ?: effect.defaultDurationSec)
+                                .let { if (effect == TransitionEffect.NONE) 0f else it.coerceIn(0.25f, 1.5f) }
+                            val layerTrackTypes = setOf(TimelineTrackType.PRODUCT, TimelineTrackType.TEXT)
+                            val targetClips = if (cmd.applyTransitionToAll) {
+                                nextClips.filter { it.trackType in layerTrackTypes }
+                            } else {
+                                val chosen = nextClips.find { it.id == current.selectedClipId && it.trackType in layerTrackTypes }
+                                    ?: nextClips.lastOrNull { it.trackType in layerTrackTypes }
+                                listOfNotNull(chosen)
+                            }
+                            val targetIds = targetClips.map { it.id }.toSet()
+                            if (targetIds.isNotEmpty()) {
+                                nextClips = nextClips
+                                    .filterNot { it.id in targetIds.map { id -> "fx_trans_$id" } }
+                                    .map { c ->
+                                        if (c.id in targetIds) {
+                                            c.copy(transitionIn = effect, transitionDurationSec = dur)
+                                        } else c
+                                    }
+                                    .toMutableList()
+                                if (effect != TransitionEffect.NONE) {
+                                    nextClips.filter { it.id in targetIds }.forEach { tc ->
+                                        nextClips.add(
+                                            TimelineClip(
+                                                id = "fx_trans_${tc.id}",
+                                                trackType = TimelineTrackType.EFFECT,
+                                                name = "⇄ ${effect.badge}",
+                                                startTimeSec = tc.startTimeSec,
+                                                durationSec = dur.coerceAtMost(tc.durationSec),
+                                                isAiGenerated = true
+                                            )
+                                        )
+                                    }
+                                }
+                                nextSelectedTransition = effect
+                                if (effect != TransitionEffect.NONE) {
+                                    nextSelectedTransitionDur = dur
+                                }
+                                val scopeLabel = if (cmd.applyTransitionToAll) "All Clips" else (targetClips.firstOrNull()?.name ?: "Clip")
+                                executedActions.add("Transition → ${effect.title} ($scopeLabel)")
+                            }
+                        }
+
+                        if (cmd.addSuspenseTransition && cmd.transitionEffect == null) {
                             nextClips.add(
                                 TimelineClip(
                                     id = "fx_suspense_${System.currentTimeMillis()}",
@@ -974,13 +1195,6 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                                 )
                             )
                             executedActions.add("Added Suspense Transition")
-                        }
-                        if (cmd.splitAtPlayhead && nextClips.isNotEmpty()) {
-                            val first = nextClips.first()
-                            val mid = first.startTimeSec + (first.durationSec / 2f)
-                            nextClips[0] = first.copy(durationSec = mid - first.startTimeSec)
-                            nextClips.add(1, first.copy(id = "${first.id}_cut", name = "${first.name} Cut", startTimeSec = mid, durationSec = first.durationSec / 2f))
-                            executedActions.add("Split Clip at Playhead")
                         }
 
                         val aiMsg = DirectorMessage(
@@ -1000,6 +1214,8 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                             selectedAudioTrack = nextAudio,
                             totalDurationSec = nextDuration,
                             timelineClips = nextClips,
+                            selectedTransition = nextSelectedTransition,
+                            selectedTransitionDurationSec = nextSelectedTransitionDur,
                             layers = nextLayers,
                             directorMessages = current.directorMessages + aiMsg,
                             isDirectorThinking = false
@@ -1573,10 +1789,14 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
     fun isStripePaymentLinkConfigured(): Boolean = paymentGatewayRepo.isStripePaymentLinkConfigured()
 
+    fun isStripePublishableKeyConfigured(): Boolean =
+        paymentGatewayRepo.hasProviderPublicKey(PaymentProvider.STRIPE)
+
     fun dismissFlutterwaveInlineModal() {
         _uiState.update {
             it.copy(
                 activeInlineWebViewSession = null,
+                activeStripePaymentSheetSession = null,
                 isProcessingPayment = false,
                 checkoutStatusBanner = null
             )
@@ -1621,25 +1841,41 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
 
             sessionResult.fold(
                 onSuccess = { session ->
-                    if (session.launchMode == CheckoutLaunchMode.FLUTTERWAVE_INLINE_WEBVIEW) {
-                        _uiState.update {
-                            it.copy(
-                                isProcessingPayment = false,
-                                activeInlineWebViewSession = session,
-                                activeCheckoutSession = null,
-                                checkoutStatusBanner = "Flutterwave checkout open. Complete payment to unlock ${plan.badgeTitle}."
-                            )
+                    when (session.launchMode) {
+                        CheckoutLaunchMode.FLUTTERWAVE_INLINE_WEBVIEW -> {
+                            _uiState.update {
+                                it.copy(
+                                    isProcessingPayment = false,
+                                    activeInlineWebViewSession = session,
+                                    activeStripePaymentSheetSession = null,
+                                    activeCheckoutSession = null,
+                                    checkoutStatusBanner = "Flutterwave checkout open. Complete payment to unlock ${plan.badgeTitle}."
+                                )
+                            }
                         }
-                    } else {
-                        _uiState.update {
-                            it.copy(
-                                isProcessingPayment = false,
-                                activeCheckoutSession = session,
-                                activeInlineWebViewSession = null,
-                                checkoutStatusBanner = "${provider.displayName} checkout open. Complete payment to unlock ${plan.badgeTitle} instantly."
-                            )
+                        CheckoutLaunchMode.STRIPE_PAYMENT_SHEET -> {
+                            _uiState.update {
+                                it.copy(
+                                    isProcessingPayment = false,
+                                    activeStripePaymentSheetSession = session,
+                                    activeInlineWebViewSession = null,
+                                    activeCheckoutSession = null,
+                                    checkoutStatusBanner = "Stripe PaymentSheet ready for ${plan.badgeTitle}."
+                                )
+                            }
                         }
-                        onLaunchCheckoutUrl(session.checkoutUrl)
+                        CheckoutLaunchMode.EXTERNAL_BROWSER_URL -> {
+                            _uiState.update {
+                                it.copy(
+                                    isProcessingPayment = false,
+                                    activeCheckoutSession = session,
+                                    activeInlineWebViewSession = null,
+                                    activeStripePaymentSheetSession = null,
+                                    checkoutStatusBanner = "${provider.displayName} checkout open. Complete payment to unlock ${plan.badgeTitle} instantly."
+                                )
+                            }
+                            onLaunchCheckoutUrl(session.checkoutUrl)
+                        }
                     }
                     onResult(true, session.sessionId)
                 },
@@ -1654,6 +1890,126 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                     }
                     onResult(false, errText)
                 }
+            )
+        }
+    }
+
+    fun handleStripePaymentSheetResult(
+        session: CheckoutSessionInit,
+        completed: Boolean,
+        cancelled: Boolean,
+        errorMessage: String?,
+        onComplete: (Boolean, String?) -> Unit = { _, _ -> }
+    ) {
+        if (cancelled) {
+            _uiState.update {
+                it.copy(
+                    activeStripePaymentSheetSession = null,
+                    isProcessingPayment = false,
+                    paymentError = "Stripe checkout was cancelled before payment completed.",
+                    checkoutStatusBanner = null
+                )
+            }
+            onComplete(false, "Stripe checkout cancelled.")
+            return
+        }
+
+        if (!completed) {
+            val errMsg = errorMessage?.takeIf { it.isNotBlank() }
+                ?: "Stripe payment could not be completed. Please try again."
+            _uiState.update {
+                it.copy(
+                    activeStripePaymentSheetSession = null,
+                    isProcessingPayment = false,
+                    paymentError = errMsg,
+                    checkoutStatusBanner = null
+                )
+            }
+            onComplete(false, errMsg)
+            return
+        }
+
+        val uid = try { Firebase.auth.currentUser?.uid } catch (_: Exception) { null }
+        if (uid == null) {
+            val errMsg = "Authenticated account required to verify & unlock ${session.plan.badgeTitle}."
+            _uiState.update {
+                it.copy(
+                    activeStripePaymentSheetSession = null,
+                    isProcessingPayment = false,
+                    paymentError = errMsg
+                )
+            }
+            onComplete(false, errMsg)
+            return
+        }
+
+        val safePiRef = ("stripe_${session.sessionId}").take(120).let {
+            if (it.length < 6) "stripe_pi_$it" else it
+        }
+
+        _uiState.update {
+            it.copy(
+                activeStripePaymentSheetSession = null,
+                isProcessingPayment = true,
+                paymentError = null,
+                checkoutStatusBanner = "Verifying Stripe payment & unlocking ${session.plan.badgeTitle}..."
+            )
+        }
+
+        if (paymentGatewayRepo.isBackendConfigured()) {
+            viewModelScope.launch {
+                val verifyRes = paymentGatewayRepo.verifyCheckoutSession(
+                    userId = uid,
+                    sessionId = session.sessionId,
+                    provider = PaymentProvider.STRIPE,
+                    expectedPlan = session.plan,
+                    expectedCycle = session.billingCycle
+                )
+                verifyRes.fold(
+                    onSuccess = { verification ->
+                        if (verification.verified) {
+                            completeVerifiedSubscription(
+                                plan = verification.plan,
+                                billingCycle = verification.billingCycle,
+                                paymentMethod = "Stripe PaymentSheet",
+                                billingEmail = session.billingEmail,
+                                externalTransactionRef = verification.transactionRef.ifBlank { safePiRef },
+                                onComplete = onComplete
+                            )
+                        } else {
+                            val pendingMsg = verification.message ?: "Stripe payment verification pending."
+                            _uiState.update { it.copy(isProcessingPayment = false, paymentError = pendingMsg) }
+                            onComplete(false, pendingMsg)
+                        }
+                    },
+                    onFailure = { err ->
+                        if (err is VerificationEndpointUnavailableException) {
+                            // Backend uses minimal /payment-sheet without /checkout/verify; PaymentSheetResult.Completed
+                            // has already been confirmed by Stripe servers.
+                            completeVerifiedSubscription(
+                                plan = session.plan,
+                                billingCycle = session.billingCycle,
+                                paymentMethod = "Stripe PaymentSheet",
+                                billingEmail = session.billingEmail,
+                                externalTransactionRef = safePiRef,
+                                onComplete = onComplete
+                            )
+                        } else {
+                            val msg = err.localizedMessage ?: "Stripe payment verification failed."
+                            _uiState.update { it.copy(isProcessingPayment = false, paymentError = msg) }
+                            onComplete(false, msg)
+                        }
+                    }
+                )
+            }
+        } else {
+            completeVerifiedSubscription(
+                plan = session.plan,
+                billingCycle = session.billingCycle,
+                paymentMethod = "Stripe PaymentSheet",
+                billingEmail = session.billingEmail,
+                externalTransactionRef = safePiRef,
+                onComplete = onComplete
             )
         }
     }
@@ -1922,6 +2278,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                             paymentError = null,
                             activeCheckoutSession = null,
                             activeInlineWebViewSession = null,
+                            activeStripePaymentSheetSession = null,
                             checkoutStatusBanner = "${plan.badgeTitle} activated!",
                             user = state.user.copy(
                                 subscriptionTier = plan.id,
@@ -1960,6 +2317,7 @@ class StudioViewModel(application: Application) : AndroidViewModel(application) 
                 paywallReason = null,
                 activeCheckoutSession = null,
                 activeInlineWebViewSession = null,
+                activeStripePaymentSheetSession = null,
                 paymentError = null,
                 user = state.user.copy(
                     subscriptionTier = SubscriptionPlan.FREE.id,

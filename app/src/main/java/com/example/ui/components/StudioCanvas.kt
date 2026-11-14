@@ -62,12 +62,17 @@ import coil.compose.AsyncImage
 import com.example.model.AspectRatioOption
 import com.example.model.BackgroundPreset
 import com.example.model.CanvasLayer
+import com.example.model.ColorFilterPreset
 import com.example.model.LayerType
 import com.example.model.LightingSettings
 import com.example.model.MotionTemplate
 import com.example.model.SubscriptionPlan
 import com.example.model.TextAnimationType
+import com.example.model.TimelineClip
+import com.example.model.TransitionEffect
 import com.example.model.isWatermarkFreeTier
+import com.example.studio.ColorGradingUtils
+import com.example.studio.ExportEngine
 import com.example.ui.theme.NeonCyan
 import com.example.ui.theme.NeonPink
 import com.example.ui.theme.NeonPurple
@@ -101,6 +106,7 @@ fun StudioCanvas(
     onBringForward: (String) -> Unit,
     onSendBackward: (String) -> Unit,
     subscriptionTier: String = "FREE",
+    timelineClips: List<TimelineClip> = emptyList(),
     modifier: Modifier = Modifier
 ) {
     // Calculate motion offsets
@@ -186,6 +192,14 @@ fun StudioCanvas(
                 BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                     val cw = maxWidth
                     val ch = maxHeight
+                    val transition = with(androidx.compose.ui.platform.LocalDensity.current) {
+                        ExportEngine.computeClipTransitionTransform(
+                            clips = timelineClips,
+                            timeSec = playheadSec,
+                            targetWidth = cw.toPx(),
+                            targetHeight = ch.toPx()
+                        )
+                    }
 
                     val sortedLayers = layers.filter { it.isVisible }.sortedBy { it.zIndex }
 
@@ -196,15 +210,17 @@ fun StudioCanvas(
                         val refY = ((prod.y + 0.28f) * ch.value).dp - (ch * 0.35f)
                         val reflectionModel: Any = prod.aiBitmap ?: prod.customImageUri ?: prod.productDrawableRes
 
+                        val reflectionColorFilter = ColorGradingUtils.toComposeColorFilter(prod.colorFilter, prod.filterIntensity)
                         AsyncImage(
                             model = reflectionModel,
                             contentDescription = "Floor Reflection",
+                            colorFilter = reflectionColorFilter,
                             modifier = Modifier
                                 .offset(x = refX, y = refY)
-                                .size(cw * 0.7f * prod.scale)
+                                .size(cw * 0.7f * prod.scale * transition.scale)
                                 .scale(1f, -1f)
-                                .rotate(-prod.rotation)
-                                .alpha(lighting.reflectionOpacity * 0.35f),
+                                .rotate(-prod.rotation - transition.rotationDeg)
+                                .alpha(lighting.reflectionOpacity * 0.35f * transition.alpha),
                             contentScale = ContentScale.Fit
                         )
                     }
@@ -215,11 +231,12 @@ fun StudioCanvas(
                         val layerCenterX = (layer.x * cw.value).dp
                         val layerCenterY = (layer.y * ch.value).dp
 
-                        // Apply motion transformations if not locked
-                        val currentScale = if (layer.type == LayerType.PRODUCT) layer.scale * motionScale else layer.scale
-                        val currentRot = if (layer.type == LayerType.PRODUCT) layer.rotation + motionRotation else layer.rotation
-                        val currentOffX = if (layer.type == LayerType.PRODUCT) motionOffsetX else 0f
-                        val currentOffY = if (layer.type == LayerType.PRODUCT) motionOffsetY else 0f
+                        // Apply motion + active transition transformations
+                        val baseScale = if (layer.type == LayerType.PRODUCT) layer.scale * motionScale else layer.scale
+                        val currentScale = baseScale * transition.scale
+                        val currentRot = (if (layer.type == LayerType.PRODUCT) layer.rotation + motionRotation else layer.rotation) + transition.rotationDeg
+                        val currentOffX = (if (layer.type == LayerType.PRODUCT) motionOffsetX else 0f) + transition.offsetX
+                        val currentOffY = (if (layer.type == LayerType.PRODUCT) motionOffsetY else 0f) + transition.offsetY
 
                         Box(
                             modifier = Modifier
@@ -232,7 +249,7 @@ fun StudioCanvas(
                                 .offset(x = (-cw * 0.35f * currentScale), y = (-ch * 0.35f * currentScale))
                                 .size(cw * 0.7f * currentScale, ch * 0.7f * currentScale)
                                 .rotate(currentRot)
-                                .alpha(layer.opacity * motionAlpha)
+                                .alpha((layer.opacity * motionAlpha * transition.alpha).coerceIn(0f, 1f))
                                 .then(
                                     if (isSelected) {
                                         Modifier.border(1.5.dp, NeonCyan, RoundedCornerShape(8.dp))
@@ -258,9 +275,11 @@ fun StudioCanvas(
                             when (layer.type) {
                                 LayerType.PRODUCT -> {
                                     val imageModel: Any = layer.aiBitmap ?: layer.customImageUri ?: layer.productDrawableRes
+                                    val prodColorFilter = ColorGradingUtils.toComposeColorFilter(layer.colorFilter, layer.filterIntensity)
                                     AsyncImage(
                                         model = imageModel,
                                         contentDescription = layer.name,
+                                        colorFilter = prodColorFilter,
                                         modifier = Modifier
                                             .fillMaxSize()
                                             .shadow(
@@ -322,6 +341,57 @@ fun StudioCanvas(
                                 }
                                 else -> {}
                             }
+                        }
+                    }
+
+                    if (transition.flashAlpha > 0.01f) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.White.copy(alpha = transition.flashAlpha))
+                        )
+                    }
+
+                    val activeFilterLayer = prodLayer?.takeIf {
+                        it.colorFilter != ColorFilterPreset.NONE && it.filterIntensity > 0.01f
+                    }
+                    if (activeFilterLayer != null) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .padding(
+                                    start = 8.dp,
+                                    bottom = if (transition.effect != TransitionEffect.NONE) 30.dp else 8.dp
+                                )
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Color(activeFilterLayer.colorFilter.accentHex).copy(alpha = 0.88f))
+                                .padding(horizontal = 7.dp, vertical = 3.dp)
+                                .testTag("canvas_active_filter_badge")
+                        ) {
+                            Text(
+                                text = "✦ ${activeFilterLayer.colorFilter.title}",
+                                color = Color.White,
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
+                    if (transition.effect != TransitionEffect.NONE) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .padding(start = 8.dp, bottom = 8.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(NeonPurple.copy(alpha = 0.85f))
+                                .padding(horizontal = 7.dp, vertical = 3.dp)
+                        ) {
+                            Text(
+                                text = "⇄ ${transition.effect.title}",
+                                color = Color.White,
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
                     }
                 }

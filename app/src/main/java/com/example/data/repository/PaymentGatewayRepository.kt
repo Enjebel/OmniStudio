@@ -27,8 +27,16 @@ enum class PaymentProvider(
 
 enum class CheckoutLaunchMode {
     EXTERNAL_BROWSER_URL,
-    FLUTTERWAVE_INLINE_WEBVIEW
+    FLUTTERWAVE_INLINE_WEBVIEW,
+    STRIPE_PAYMENT_SHEET
 }
+
+data class StripePaymentSheetPayload(
+    val publishableKey: String,
+    val paymentIntentClientSecret: String,
+    val customerId: String? = null,
+    val ephemeralKeySecret: String? = null
+)
 
 data class CheckoutSessionInit(
     val sessionId: String,
@@ -40,8 +48,11 @@ data class CheckoutSessionInit(
     val billingEmail: String,
     val launchMode: CheckoutLaunchMode = CheckoutLaunchMode.EXTERNAL_BROWSER_URL,
     val inlinePublicKey: String = "",
-    val customerName: String = "OmniStudio Creator"
+    val customerName: String = "OmniStudio Creator",
+    val stripePaymentSheet: StripePaymentSheetPayload? = null
 )
+
+class VerificationEndpointUnavailableException(message: String) : IllegalStateException(message)
 
 data class CheckoutVerificationResult(
     val verified: Boolean,
@@ -96,6 +107,13 @@ class PaymentGatewayRepository(
 
     fun isBackendConfigured(): Boolean = normalizeHttpUrl(BuildConfig.PAYMENT_BACKEND_URL).isNotBlank()
 
+    fun getStripePublishableKey(): String {
+        val key = cleanSecret(BuildConfig.STRIPE_PUBLISHABLE_KEY)
+        return key.takeIf { it.isNotBlank() && !it.startsWith("YOUR_") }.orEmpty()
+    }
+
+    fun getPaymentBackendUrl(): String = normalizeHttpUrl(BuildConfig.PAYMENT_BACKEND_URL)
+
     fun hasProviderPublicKey(provider: PaymentProvider): Boolean {
         val key = when (provider) {
             PaymentProvider.STRIPE -> cleanSecret(BuildConfig.STRIPE_PUBLISHABLE_KEY)
@@ -113,6 +131,98 @@ class PaymentGatewayRepository(
     fun isProviderReady(provider: PaymentProvider): Boolean = when (provider) {
         PaymentProvider.FLUTTERWAVE -> isBackendConfigured() || isFlutterwaveDirectConfigured()
         PaymentProvider.STRIPE -> isBackendConfigured() || isStripePaymentLinkConfigured()
+    }
+
+    fun parseBackendSessionPayload(
+        json: JSONObject,
+        provider: PaymentProvider,
+        plan: SubscriptionPlan,
+        billingCycle: BillingCycle,
+        amountUsd: Double,
+        billingEmail: String,
+        customerName: String,
+        fallbackPublishableKey: String = getStripePublishableKey()
+    ): Result<CheckoutSessionInit> {
+        val cleanCustomerName = customerName.ifBlank { "OmniStudio Creator" }
+
+        // Check for native Stripe PaymentSheet fields first
+        if (provider == PaymentProvider.STRIPE) {
+            val clientSecret = json.optString("paymentIntentClientSecret")
+                .ifBlank { json.optString("paymentIntent") }
+                .ifBlank { json.optString("clientSecret") }
+                .ifBlank { json.optString("client_secret") }
+
+            if (clientSecret.isNotBlank()) {
+                val publishableKey = cleanSecret(
+                    json.optString("publishableKey")
+                        .ifBlank { json.optString("publishable_key") }
+                ).takeIf { it.isNotBlank() && !it.startsWith("YOUR_") }
+                    ?: cleanSecret(fallbackPublishableKey).takeIf { it.isNotBlank() && !it.startsWith("YOUR_") }
+                    ?: return Result.failure(
+                        IllegalStateException(
+                            "STRIPE_PUBLISHABLE_KEY is required for Stripe PaymentSheet. Add it in the AI Studio Secrets panel."
+                        )
+                    )
+
+                val customerId = json.optString("customer")
+                    .ifBlank { json.optString("customerId") }
+                    .ifBlank { json.optString("customer_id") }
+                    .takeIf { it.isNotBlank() }
+                val ephemeralKey = json.optString("ephemeralKey")
+                    .ifBlank { json.optString("ephemeralKeySecret") }
+                    .ifBlank { json.optString("ephemeral_key") }
+                    .takeIf { it.isNotBlank() }
+
+                val piId = json.optString("sessionId")
+                    .ifBlank { json.optString("paymentIntentId") }
+                    .ifBlank { json.optString("id") }
+                    .ifBlank { clientSecret.substringBefore("_secret_").ifBlank { "pi_${UUID.randomUUID().toString().replace("-", "").take(12)}" } }
+
+                return Result.success(
+                    CheckoutSessionInit(
+                        sessionId = piId,
+                        checkoutUrl = "",
+                        provider = PaymentProvider.STRIPE,
+                        plan = plan,
+                        billingCycle = billingCycle,
+                        amountUsd = amountUsd,
+                        billingEmail = billingEmail,
+                        launchMode = CheckoutLaunchMode.STRIPE_PAYMENT_SHEET,
+                        inlinePublicKey = publishableKey,
+                        customerName = cleanCustomerName,
+                        stripePaymentSheet = StripePaymentSheetPayload(
+                            publishableKey = publishableKey,
+                            paymentIntentClientSecret = clientSecret,
+                            customerId = customerId,
+                            ephemeralKeySecret = ephemeralKey
+                        )
+                    )
+                )
+            }
+        }
+
+        // Standard hosted checkout session URL fallback
+        val sessionId = json.optString("sessionId").ifBlank { json.optString("id") }
+        val checkoutUrl = json.optString("checkoutUrl").ifBlank { json.optString("url") }
+        if (sessionId.isBlank() || checkoutUrl.isBlank()) {
+            return Result.failure(
+                IllegalStateException("Payment backend returned an incomplete checkout session payload.")
+            )
+        }
+
+        return Result.success(
+            CheckoutSessionInit(
+                sessionId = sessionId,
+                checkoutUrl = checkoutUrl,
+                provider = provider,
+                plan = plan,
+                billingCycle = billingCycle,
+                amountUsd = amountUsd,
+                billingEmail = billingEmail,
+                launchMode = CheckoutLaunchMode.EXTERNAL_BROWSER_URL,
+                customerName = cleanCustomerName
+            )
+        )
     }
 
     suspend fun createCheckoutSession(
@@ -134,10 +244,10 @@ class PaymentGatewayRepository(
         val amountUsd = if (billingCycle == BillingCycle.YEARLY) plan.yearlyTotalUsd else plan.monthlyPriceUsd
         val backendUrl = normalizeHttpUrl(BuildConfig.PAYMENT_BACKEND_URL)
 
-        // 1. Server-backed checkout (recommended for production)
+        // 1. Server-backed checkout (supports both Stripe PaymentSheet intents & hosted Checkout URLs)
         if (backendUrl.isNotBlank()) {
             val publicKey = when (provider) {
-                PaymentProvider.STRIPE -> cleanSecret(BuildConfig.STRIPE_PUBLISHABLE_KEY)
+                PaymentProvider.STRIPE -> getStripePublishableKey()
                 PaymentProvider.FLUTTERWAVE -> cleanSecret(BuildConfig.FLUTTERWAVE_PUBLIC_KEY)
             }.takeUnless { it.startsWith("YOUR_") }.orEmpty()
 
@@ -145,58 +255,64 @@ class PaymentGatewayRepository(
                 val payload = JSONObject().apply {
                     put("userId", userId)
                     put("email", cleanEmail)
+                    put("customerName", customerName.ifBlank { "OmniStudio Creator" })
                     put("planTier", plan.id)
                     put("billingCycle", billingCycle.id)
                     put("amountUsd", amountUsd)
-                    put("currency", "USD")
+                    put("amountCents", kotlin.math.round(amountUsd * 100.0).toLong())
+                    put("currency", if (provider == PaymentProvider.STRIPE) "usd" else "USD")
                     put("provider", provider.id)
                     put("successUrl", "$CALLBACK_DEEP_LINK?status=successful&plan=${plan.id}&cycle=${billingCycle.id}&provider=${provider.id}")
                     put("cancelUrl", "$CALLBACK_DEEP_LINK?status=cancelled&plan=${plan.id}&cycle=${billingCycle.id}&provider=${provider.id}")
                 }
 
-                val requestBuilder = Request.Builder()
-                    .url("$backendUrl/checkout/session")
-                    .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
-                    .addHeader("Accept", "application/json")
-                if (publicKey.isNotBlank()) {
-                    requestBuilder.addHeader("X-Payment-Public-Key", publicKey)
+                val endpoints = if (provider == PaymentProvider.STRIPE) {
+                    listOf("$backendUrl/checkout/session", "$backendUrl/payment-sheet")
+                } else {
+                    listOf("$backendUrl/checkout/session")
                 }
 
-                client.newCall(requestBuilder.build()).execute().use { response ->
-                    val rawBody = response.body?.string().orEmpty()
-                    if (!response.isSuccessful) {
-                        val serverMsg = runCatching { JSONObject(rawBody).optString("error") }.getOrNull()
-                        return@withContext Result.failure(
-                            IllegalStateException(
+                var lastError: Throwable? = null
+                for ((idx, endpointUrl) in endpoints.withIndex()) {
+                    val requestBuilder = Request.Builder()
+                        .url(endpointUrl)
+                        .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
+                        .addHeader("Accept", "application/json")
+                    if (publicKey.isNotBlank()) {
+                        requestBuilder.addHeader("X-Payment-Public-Key", publicKey)
+                    }
+
+                    client.newCall(requestBuilder.build()).execute().use { response ->
+                        val rawBody = response.body?.string().orEmpty()
+                        if (response.code == 404 && idx < endpoints.lastIndex) {
+                            return@use
+                        }
+                        if (!response.isSuccessful) {
+                            val serverMsg = runCatching { JSONObject(rawBody).optString("error") }.getOrNull()
+                            lastError = IllegalStateException(
                                 serverMsg?.takeIf { it.isNotBlank() }
                                     ?: "Checkout session failed (HTTP ${response.code})."
                             )
-                        )
-                    }
+                            return@withContext Result.failure(lastError!!)
+                        }
 
-                    val json = JSONObject(rawBody)
-                    val sessionId = json.optString("sessionId").ifBlank { json.optString("id") }
-                    val checkoutUrl = json.optString("checkoutUrl").ifBlank { json.optString("url") }
-                    if (sessionId.isBlank() || checkoutUrl.isBlank()) {
-                        return@withContext Result.failure(
-                            IllegalStateException("Payment backend returned an incomplete checkout session payload.")
-                        )
-                    }
-
-                    Result.success(
-                        CheckoutSessionInit(
-                            sessionId = sessionId,
-                            checkoutUrl = checkoutUrl,
+                        val json = JSONObject(rawBody)
+                        return@withContext parseBackendSessionPayload(
+                            json = json,
                             provider = provider,
                             plan = plan,
                             billingCycle = billingCycle,
                             amountUsd = amountUsd,
                             billingEmail = cleanEmail,
-                            launchMode = CheckoutLaunchMode.EXTERNAL_BROWSER_URL,
-                            customerName = customerName.ifBlank { "OmniStudio Creator" }
+                            customerName = customerName,
+                            fallbackPublishableKey = publicKey
                         )
-                    )
+                    }
                 }
+
+                Result.failure(
+                    lastError ?: IllegalStateException("Payment backend endpoint not found (HTTP 404).")
+                )
             } catch (e: Exception) {
                 Log.e(TAG, "Checkout session error: ${e.message}", e)
                 Result.failure(
@@ -254,7 +370,7 @@ class PaymentGatewayRepository(
             PaymentProvider.FLUTTERWAVE ->
                 "Flutterwave checkout needs FLUTTERWAVE_PUBLIC_KEY (e.g. FLWPUBK_TEST-...) or PAYMENT_BACKEND_URL set in the AI Studio Secrets panel."
             PaymentProvider.STRIPE ->
-                "Stripe checkout needs PAYMENT_BACKEND_URL or STRIPE_PAYMENT_LINK_URL set in the AI Studio Secrets panel."
+                "Stripe checkout needs PAYMENT_BACKEND_URL + STRIPE_PUBLISHABLE_KEY (or STRIPE_PAYMENT_LINK_URL) set in the AI Studio Secrets panel."
         }
         Result.failure(IllegalStateException(missingMsg))
     }
@@ -290,6 +406,11 @@ class PaymentGatewayRepository(
 
             client.newCall(request).execute().use { response ->
                 val rawBody = response.body?.string().orEmpty()
+                if (response.code == 404) {
+                    return@withContext Result.failure(
+                        VerificationEndpointUnavailableException("Verification endpoint not configured on backend (HTTP 404).")
+                    )
+                }
                 if (!response.isSuccessful) {
                     val serverMsg = runCatching { JSONObject(rawBody).optString("error") }.getOrNull()
                     return@withContext Result.failure(

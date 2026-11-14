@@ -8,6 +8,7 @@ import com.example.model.BackgroundPreset
 import com.example.model.CameraMovement
 import com.example.model.MotionTemplate
 import com.example.model.MuseGeneratedClip
+import com.example.model.TransitionEffect
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.AspectRatio
@@ -36,7 +37,10 @@ data class DirectorCommandResult(
     val newCta: String? = null,
     val newBgPreset: BackgroundPreset? = null,
     val newAspectRatio: AspectRatioOption? = null,
-    val newAudioTrack: AudioTrackOption? = null
+    val newAudioTrack: AudioTrackOption? = null,
+    val transitionEffect: TransitionEffect? = null,
+    val transitionDurationSec: Float? = null,
+    val applyTransitionToAll: Boolean = false
 )
 
 data class MuseShotPlan(
@@ -85,6 +89,16 @@ class OmniAiEngine {
             "newAudioTrack" to Schema.enumeration(
                 values = AudioTrackOption.entries.map { it.name },
                 description = "Optional BGM audio track mood."
+            ),
+            "transitionEffect" to Schema.enumeration(
+                values = TransitionEffect.entries.map { it.name },
+                description = "Optional clip-to-clip transition effect (FADE, SLIDE_LEFT, SLIDE_UP, ZOOM_IN, WHIP_PAN, FLASH_CUT, or NONE to remove)."
+            ),
+            "transitionDurationSec" to Schema.double(
+                description = "Optional transition duration in seconds from 0.3 to 1.5."
+            ),
+            "applyTransitionToAll" to Schema.boolean(
+                description = "True to apply the transitionEffect across all multi-layered video/text clips in the timeline."
             )
         ),
         optionalProperties = listOf(
@@ -95,7 +109,9 @@ class OmniAiEngine {
             "newCta",
             "newBgPreset",
             "newAspectRatio",
-            "newAudioTrack"
+            "newAudioTrack",
+            "transitionEffect",
+            "transitionDurationSec"
         )
     )
 
@@ -151,9 +167,10 @@ class OmniAiEngine {
                 
                 Rules:
                 - Interpret the creator's request and map it to concrete timeline/canvas edits using the JSON fields.
-                - If they say "Make this punchier for TikTok": set motionPreset=DYNAMIC_ZOOM_PUNCH, motionSpeed=1.6, motionIntensity=1.5, trimDeadAir=true, newAspectRatio=RATIO_9_16, and suggest a punchy newHeadline.
+                - If they say "Make this punchier for TikTok": set motionPreset=DYNAMIC_ZOOM_PUNCH, motionSpeed=1.6, motionIntensity=1.5, trimDeadAir=true, newAspectRatio=RATIO_9_16, transitionEffect=ZOOM_IN, and suggest a punchy newHeadline.
                 - If they say "Cut out dead air": set trimDeadAir=true and splitAtPlayhead=false (or true if splitting silence).
-                - If they say "Add a suspenseful transition": set addSuspenseTransition=true and motionPreset=FLASH_SALE_GLITCH or CINEMATIC_REVEAL.
+                - If they say "Add a suspenseful transition": set addSuspenseTransition=true, transitionEffect=FLASH_CUT (or ZOOM_IN), transitionDurationSec=0.45, and motionPreset=FLASH_SALE_GLITCH or CINEMATIC_REVEAL.
+                - If they ask for fade, dissolve, slide, wipe, zoom, whip pan, or flash transitions between clips: set transitionEffect (FADE, SLIDE_LEFT, SLIDE_UP, ZOOM_IN, WHIP_PAN, FLASH_CUT, or NONE), transitionDurationSec (0.3-1.5), and set applyTransitionToAll=true if they say "all clips" or "between clips".
                 - Always explain what you modified in 'reply' and ask 1 helpful clarifying question, with 2-3 short 'followUps'.
             """.trimIndent()
 
@@ -190,6 +207,12 @@ class OmniAiEngine {
             val newAudioTrack = json.optString("newAudioTrack", "").let { name ->
                 AudioTrackOption.entries.find { it.name == name }
             }
+            val transitionEffect = json.optString("transitionEffect", "").let { name ->
+                TransitionEffect.entries.find { it.name == name }
+            }
+            val transitionDurationSec = if (json.has("transitionDurationSec") && !json.isNull("transitionDurationSec")) {
+                json.getDouble("transitionDurationSec").toFloat().coerceIn(0.3f, 1.5f)
+            } else null
 
             val speedVal = if (json.has("motionSpeed") && !json.isNull("motionSpeed")) {
                 json.getDouble("motionSpeed").toFloat().coerceIn(0.5f, 2.5f)
@@ -221,7 +244,10 @@ class OmniAiEngine {
                     newCta = ctaVal,
                     newBgPreset = newBgPreset,
                     newAspectRatio = newAspectRatio,
-                    newAudioTrack = newAudioTrack
+                    newAudioTrack = newAudioTrack,
+                    transitionEffect = transitionEffect,
+                    transitionDurationSec = transitionDurationSec,
+                    applyTransitionToAll = json.optBoolean("applyTransitionToAll", false)
                 )
             )
         } catch (e: TimeoutCancellationException) {

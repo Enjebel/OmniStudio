@@ -42,6 +42,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.CompareArrows
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.AutoFixHigh
@@ -54,6 +55,7 @@ import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.MovieCreation
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.PhotoFilter
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.TextFields
@@ -74,6 +76,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -91,6 +94,10 @@ import androidx.compose.ui.unit.sp
 import androidx.credentials.CredentialManager
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.ai.configureAppCheck
+import com.stripe.android.PaymentConfiguration
+import com.stripe.android.paymentsheet.PaymentSheet
+import com.stripe.android.paymentsheet.PaymentSheetResult
+import com.stripe.android.paymentsheet.rememberPaymentSheet
 import com.example.ui.auth.AuthScreen
 import com.example.ui.auth.signOutUser
 import com.example.ui.components.AiCopyGeneratorPanel
@@ -99,6 +106,7 @@ import com.example.ui.components.BatchCreatorPanel
 import com.example.ui.components.BgRemovalScreen
 import com.example.ui.components.DirectorChatScreen
 import com.example.ui.components.ExportDialog
+import com.example.ui.components.FiltersScreen
 import com.example.ui.components.FlutterwaveCheckoutModal
 import com.example.ui.components.HistoryPanel
 import com.example.ui.components.LayerManagerPanel
@@ -111,6 +119,7 @@ import com.example.ui.components.StudioCanvas
 import com.example.ui.components.StudioTimeline
 import com.example.ui.components.StudioTopBar
 import com.example.ui.components.TemplateMarketplacePanel
+import com.example.ui.components.TransitionsScreen
 import com.example.ui.components.pressScaleClickable
 import com.example.ui.components.verticalScrollbar
 import com.example.ui.theme.MyApplicationTheme
@@ -141,6 +150,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // Must initialize App Check before any Firebase / ViewModel calls
         configureAppCheck(this, intent)
+        val stripeKey = BuildConfig.STRIPE_PUBLISHABLE_KEY.trim().trim('"', '\'').trim()
+        if (stripeKey.isNotBlank() && !stripeKey.startsWith("YOUR_")) {
+            PaymentConfiguration.init(applicationContext, stripeKey)
+        }
         enableEdgeToEdge()
         intent?.data?.let { uri ->
             viewModel.handleCheckoutCallbackUri(uri)
@@ -243,9 +256,81 @@ fun OmniStudioApp(
 ) {
     val context = LocalContext.current
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val latestStripeSession by rememberUpdatedState(state.activeStripePaymentSheetSession)
     var showExportDialog by remember { mutableStateOf(false) }
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+
+    val paymentSheet = rememberPaymentSheet { paymentResult ->
+        val pendingSession = latestStripeSession ?: return@rememberPaymentSheet
+        when (paymentResult) {
+            is PaymentSheetResult.Completed -> {
+                viewModel.handleStripePaymentSheetResult(
+                    session = pendingSession,
+                    completed = true,
+                    cancelled = false,
+                    errorMessage = null
+                ) { success, msg ->
+                    Toast.makeText(
+                        context,
+                        if (success) "${pendingSession.plan.badgeTitle} unlocked!" else (msg ?: "Stripe verification failed."),
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+            is PaymentSheetResult.Canceled -> {
+                viewModel.handleStripePaymentSheetResult(
+                    session = pendingSession,
+                    completed = false,
+                    cancelled = true,
+                    errorMessage = null
+                )
+            }
+            is PaymentSheetResult.Failed -> {
+                viewModel.handleStripePaymentSheetResult(
+                    session = pendingSession,
+                    completed = false,
+                    cancelled = false,
+                    errorMessage = paymentResult.error.localizedMessage ?: "Stripe payment failed."
+                )
+            }
+        }
+    }
+
+    val pendingStripeSession = state.activeStripePaymentSheetSession
+    LaunchedEffect(pendingStripeSession?.sessionId) {
+        val sheetPayload = pendingStripeSession?.stripePaymentSheet
+        if (pendingStripeSession != null && sheetPayload != null) {
+            PaymentConfiguration.init(context.applicationContext, sheetPayload.publishableKey)
+            val customerConfig = if (
+                !sheetPayload.customerId.isNullOrBlank() &&
+                !sheetPayload.ephemeralKeySecret.isNullOrBlank()
+            ) {
+                PaymentSheet.CustomerConfiguration(
+                    id = sheetPayload.customerId,
+                    ephemeralKeySecret = sheetPayload.ephemeralKeySecret
+                )
+            } else {
+                null
+            }
+
+            val configBuilder = PaymentSheet.Configuration.Builder(merchantDisplayName = "OmniStudio AI")
+                .defaultBillingDetails(
+                    PaymentSheet.BillingDetails(
+                        email = pendingStripeSession.billingEmail,
+                        name = pendingStripeSession.customerName
+                    )
+                )
+            if (customerConfig != null) {
+                configBuilder.customer(customerConfig)
+            }
+
+            paymentSheet.presentWithPaymentIntent(
+                paymentIntentClientSecret = sheetPayload.paymentIntentClientSecret,
+                configuration = configBuilder.build()
+            )
+        }
+    }
 
     val quickPhotoToAdLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -402,6 +487,60 @@ fun OmniStudioApp(
                                 Toast.makeText(context, "Injected \"${clip.title}\" onto Multi-Track Timeline!", Toast.LENGTH_SHORT).show()
                             },
                             onOpenUpgradeModal = { viewModel.openProUpgradeModal() }
+                        )
+                    }
+
+                    OmniModule.TRANSITIONS -> {
+                        TransitionsScreen(
+                            clips = state.timelineClips,
+                            selectedClipId = state.selectedClipId,
+                            selectedTransition = state.selectedTransition,
+                            transitionDurationSec = state.selectedTransitionDurationSec,
+                            onSelectClip = { clipId -> viewModel.selectClip(clipId) },
+                            onSelectTransition = { effect -> viewModel.selectTransitionPreset(effect) },
+                            onDurationChanged = { dur -> viewModel.setTransitionDuration(dur) },
+                            onApplyToSelectedClip = {
+                                viewModel.applyTransitionToClip()
+                                Toast.makeText(
+                                    context,
+                                    "Applied ${state.selectedTransition.title} to selected clip!",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            },
+                            onApplyToAllClips = {
+                                viewModel.applyTransitionBetweenAllClips()
+                                Toast.makeText(
+                                    context,
+                                    "Applied ${state.selectedTransition.title} between all clips!",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            },
+                            onSplitPrimaryClip = {
+                                viewModel.splitClipAtPlayhead()
+                                Toast.makeText(context, "Clip split to create a transition boundary!", Toast.LENGTH_SHORT).show()
+                            },
+                            onPreviewInStudio = {
+                                viewModel.setActiveModule(OmniModule.STUDIO)
+                                viewModel.seekPlayhead(0f)
+                                if (!state.isPlaying) {
+                                    viewModel.startPlayback()
+                                }
+                            },
+                            onAskDirectorForTransition = {
+                                viewModel.setActiveModule(OmniModule.DIRECTOR)
+                            }
+                        )
+                    }
+
+                    OmniModule.FILTERS -> {
+                        FiltersScreen(
+                            layers = state.layers,
+                            activeFilter = state.activeProductFilter,
+                            intensity = state.productFilterIntensity,
+                            onSelectFilter = { preset -> viewModel.applyProductFilter(preset) },
+                            onIntensityChanged = { intensity -> viewModel.setProductFilterIntensity(intensity) },
+                            onResetFilter = { viewModel.resetProductFilter() },
+                            onPreviewInStudio = { viewModel.setActiveModule(OmniModule.STUDIO) }
                         )
                     }
 
@@ -593,7 +732,12 @@ fun OmniStudioApp(
                 bgPreset = state.bgPreset,
                 lighting = state.lighting,
                 aspectRatio = state.aspectRatio,
+                motionTemplate = state.motionTemplate,
+                motionSpeed = state.motionSpeed,
+                motionIntensity = state.motionIntensity,
+                totalDurationSec = state.totalDurationSec,
                 subscriptionTier = state.subscriptionTier,
+                timelineClips = state.timelineClips,
                 onUpgradeToPro = {
                     showExportDialog = false
                     viewModel.openProUpgradeModal()
@@ -624,6 +768,7 @@ fun OmniStudioApp(
                 isPaymentBackendConfigured = viewModel.isPaymentBackendConfigured(),
                 isFlutterwaveConfigured = viewModel.isFlutterwaveDirectConfigured(),
                 isStripeLinkConfigured = viewModel.isStripePaymentLinkConfigured(),
+                isStripePublishableKeyConfigured = viewModel.isStripePublishableKeyConfigured(),
                 onSelectProvider = { provider -> viewModel.selectPaymentProvider(provider) },
                 onStartPlanCheckout = { plan, cycle, provider, email ->
                     viewModel.initiatePlanCheckout(
@@ -732,7 +877,8 @@ private fun StudioWorkspaceContent(
                     onDeleteLayer = { viewModel.deleteLayer(it) },
                     onBringForward = { viewModel.bringLayerForward(it) },
                     onSendBackward = { viewModel.sendLayerBackward(it) },
-                    subscriptionTier = state.subscriptionTier
+                    subscriptionTier = state.subscriptionTier,
+                    timelineClips = state.timelineClips
                 )
             }
 
@@ -748,6 +894,10 @@ private fun StudioWorkspaceContent(
                 onSelectClip = { viewModel.selectClip(it) },
                 onSplitClip = { viewModel.splitClipAtPlayhead() },
                 onTrimClip = { viewModel.trimSelectedClip() },
+                onApplyTransitionToClip = { clipId, effect, dur ->
+                    viewModel.applyTransitionToClip(clipId, effect, dur)
+                },
+                onOpenTransitions = { viewModel.setActiveModule(OmniModule.TRANSITIONS) },
                 onUpdateClip = { id, start, dur -> viewModel.updateClip(id, start, dur) }
             )
 
@@ -873,7 +1023,9 @@ private fun OmniBottomNavBar(
         NavDestination(OmniModule.STUDIO, Icons.Default.Movie, "Studio"),
         NavDestination(OmniModule.DIRECTOR, Icons.Default.Psychology, "Director"),
         NavDestination(OmniModule.MUSE_AI, Icons.Default.MovieCreation, "Muse AI"),
-        NavDestination(OmniModule.BG_REMOVAL, Icons.Default.AutoFixHigh, "Bg Removal"),
+        NavDestination(OmniModule.TRANSITIONS, Icons.AutoMirrored.Filled.CompareArrows, "Transitions"),
+        NavDestination(OmniModule.FILTERS, Icons.Default.PhotoFilter, "Filters"),
+        NavDestination(OmniModule.BG_REMOVAL, Icons.Default.AutoFixHigh, "Cutout"),
         NavDestination(OmniModule.FEED, Icons.Default.DynamicFeed, "Feed")
     )
 
@@ -884,60 +1036,69 @@ private fun OmniBottomNavBar(
             .windowInsetsPadding(WindowInsets.navigationBars)
             .padding(horizontal = 10.dp, vertical = 6.dp)
     ) {
-        Row(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(20.dp))
                 .background(StudioSurface)
                 .border(1.dp, StudioBorder, RoundedCornerShape(20.dp))
-                .padding(horizontal = 5.dp, vertical = 5.dp),
-            horizontalArrangement = Arrangement.spacedBy(3.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(horizontal = 5.dp, vertical = 5.dp)
         ) {
-            destinations.forEach { dest ->
-                val isSelected = activeModule == dest.module
-                val scale by animateFloatAsState(
-                    targetValue = if (isSelected) 1.02f else 1.0f,
-                    animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
-                    label = "nav_scale_${dest.module.name}"
-                )
+            val spacing = 3.dp * (destinations.size - 1)
+            val itemWidth = maxOf(56.dp, (maxWidth - spacing) / destinations.size)
 
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(54.dp)
-                        .scale(scale)
-                        .clip(RoundedCornerShape(15.dp))
-                        .background(
-                            if (isSelected) OmniTheme.colors.accentPurple.copy(alpha = 0.14f)
-                            else Color.Transparent
-                        )
-                        .border(
-                            width = if (isSelected) 1.dp else 0.dp,
-                            color = if (isSelected) OmniTheme.colors.accentPurple.copy(alpha = 0.45f) else Color.Transparent,
-                            shape = RoundedCornerShape(15.dp)
-                        )
-                        .pressScaleClickable { onSelectModule(dest.module) }
-                        .padding(horizontal = 2.dp, vertical = 4.dp)
-                        .testTag("nav_${dest.module.name}"),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Icon(
-                        imageVector = dest.icon,
-                        contentDescription = dest.label,
-                        tint = if (isSelected) OmniTheme.colors.accentPurple else TextMuted,
-                        modifier = Modifier.size(18.dp)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                destinations.forEach { dest ->
+                    val isSelected = activeModule == dest.module
+                    val scale by animateFloatAsState(
+                        targetValue = if (isSelected) 1.02f else 1.0f,
+                        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
+                        label = "nav_scale_${dest.module.name}"
                     )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = dest.label,
-                        color = if (isSelected) TextPrimary else TextSecondary,
-                        fontSize = 9.sp,
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+
+                    Column(
+                        modifier = Modifier
+                            .width(itemWidth)
+                            .height(54.dp)
+                            .scale(scale)
+                            .clip(RoundedCornerShape(15.dp))
+                            .background(
+                                if (isSelected) OmniTheme.colors.accentPurple.copy(alpha = 0.14f)
+                                else Color.Transparent
+                            )
+                            .border(
+                                width = if (isSelected) 1.dp else 0.dp,
+                                color = if (isSelected) OmniTheme.colors.accentPurple.copy(alpha = 0.45f) else Color.Transparent,
+                                shape = RoundedCornerShape(15.dp)
+                            )
+                            .pressScaleClickable { onSelectModule(dest.module) }
+                            .padding(horizontal = 2.dp, vertical = 4.dp)
+                            .testTag("nav_${dest.module.name}"),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = dest.icon,
+                            contentDescription = dest.label,
+                            tint = if (isSelected) OmniTheme.colors.accentPurple else TextMuted,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = dest.label,
+                            color = if (isSelected) TextPrimary else TextSecondary,
+                            fontSize = 8.sp,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
         }

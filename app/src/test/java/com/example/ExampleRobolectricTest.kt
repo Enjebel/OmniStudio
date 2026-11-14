@@ -8,25 +8,45 @@ import com.example.data.repository.CheckoutLaunchMode
 import com.example.data.repository.CheckoutSessionInit
 import com.example.data.repository.PaymentGatewayRepository
 import com.example.data.repository.PaymentProvider
+import com.example.data.repository.StripePaymentSheetPayload
+import org.json.JSONObject
 import com.example.model.AspectRatioOption
 import com.example.model.BgRemovalMode
 import com.example.model.BgReplacementType
 import com.example.model.BillingCycle
 import com.example.model.CameraMovement
 import com.example.model.ChromaKeyColor
+import com.example.model.ColorFilterPreset
+import com.example.model.LayerType
 import com.example.model.MotionTemplate
 import com.example.model.MuseGeneratedClip
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
+import com.example.ai.DirectorCommandResult
+import com.example.model.CanvasLayer
 import com.example.model.SubscriptionPlan
+import com.example.model.TimelineClip
 import com.example.model.TimelineTrackType
+import com.example.model.TransitionEffect
 import com.example.model.isPaidTier
 import com.example.model.isUnlimitedAiTier
 import com.example.model.isWatermarkFreeTier
+import com.example.studio.ColorGradingUtils
+import com.example.ui.components.FiltersScreen
+import com.example.ui.components.StudioTimeline
+import com.example.ui.theme.MyApplicationTheme
 import com.example.viewmodel.OmniModule
 import com.example.viewmodel.StudioViewModel
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -35,6 +55,9 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
 class ExampleRobolectricTest {
+
+  @get:Rule
+  val composeTestRule = createComposeRule()
 
   @Test
   fun readStringFromContext() {
@@ -55,14 +78,18 @@ class ExampleRobolectricTest {
     val initialClipsCount = vm.uiState.value.timelineClips.size
     assertTrue(initialClipsCount >= 4)
 
-    // Switch modules including BG_REMOVAL (5-tab architecture)
+    // Switch modules including TRANSITIONS, FILTERS, and BG_REMOVAL (7-tab architecture)
     vm.setActiveModule(OmniModule.DIRECTOR)
     assertEquals(OmniModule.DIRECTOR, vm.uiState.value.activeModule)
     vm.setActiveModule(OmniModule.MUSE_AI)
     assertEquals(OmniModule.MUSE_AI, vm.uiState.value.activeModule)
+    vm.setActiveModule(OmniModule.TRANSITIONS)
+    assertEquals(OmniModule.TRANSITIONS, vm.uiState.value.activeModule)
+    vm.setActiveModule(OmniModule.FILTERS)
+    assertEquals(OmniModule.FILTERS, vm.uiState.value.activeModule)
     vm.setActiveModule(OmniModule.BG_REMOVAL)
     assertEquals(OmniModule.BG_REMOVAL, vm.uiState.value.activeModule)
-    assertEquals(5, OmniModule.entries.size)
+    assertEquals(7, OmniModule.entries.size)
 
     // Split & Trim clip at playhead
     vm.seekPlayhead(5f)
@@ -125,6 +152,56 @@ class ExampleRobolectricTest {
     assertTrue(vm.uiState.value.timelineClips.any { it.id == "tl_muse_test_01" && it.trackType == TimelineTrackType.PRODUCT })
     assertTrue(vm.uiState.value.timelineClips.any { it.id == "fx_muse_test_01" && it.trackType == TimelineTrackType.EFFECT })
     assertTrue(vm.uiState.value.timelineClips.any { it.id == "aud_muse_test_01" && it.trackType == TimelineTrackType.AUDIO })
+
+    // Transitions tab controls: apply to single clip & apply between all multi-layered clips
+    vm.selectTransitionPreset(TransitionEffect.SLIDE_LEFT)
+    vm.setTransitionDuration(0.75f)
+    vm.applyTransitionToClip("tl_muse_test_01", TransitionEffect.SLIDE_LEFT, 0.75f)
+    val updatedSingle = vm.uiState.value.timelineClips.first { it.id == "tl_muse_test_01" }
+    assertEquals(TransitionEffect.SLIDE_LEFT, updatedSingle.transitionIn)
+    assertEquals(0.75f, updatedSingle.transitionDurationSec, 0.01f)
+    assertTrue(vm.uiState.value.timelineClips.any { it.id == "fx_trans_tl_muse_test_01" && it.trackType == TimelineTrackType.EFFECT })
+
+    vm.applyTransitionBetweenAllClips(TransitionEffect.ZOOM_IN, 0.5f)
+    val layerClips = vm.uiState.value.timelineClips.filter {
+      it.trackType == TimelineTrackType.PRODUCT || it.trackType == TimelineTrackType.TEXT
+    }
+    assertTrue(layerClips.isNotEmpty())
+    assertTrue(layerClips.all { it.transitionIn == TransitionEffect.ZOOM_IN && it.transitionDurationSec == 0.5f })
+
+    // Verify DirectorCommandResult supports transition directives
+    val dirCmd = DirectorCommandResult(
+      reply = "Added zoom transitions between your clips.",
+      followUps = listOf("Make it faster"),
+      transitionEffect = TransitionEffect.ZOOM_IN,
+      transitionDurationSec = 0.45f,
+      applyTransitionToAll = true
+    )
+    assertEquals(TransitionEffect.ZOOM_IN, dirCmd.transitionEffect)
+    assertTrue(dirCmd.applyTransitionToAll)
+
+    // Product Color Filter presets & intensity updates propagate to PRODUCT layers
+    assertEquals(ColorFilterPreset.NONE, vm.uiState.value.activeProductFilter)
+    vm.applyProductFilter(ColorFilterPreset.CINEMATIC, 0.85f)
+    assertEquals(ColorFilterPreset.CINEMATIC, vm.uiState.value.activeProductFilter)
+    assertEquals(0.85f, vm.uiState.value.productFilterIntensity, 0.01f)
+    val gradedProdLayers = vm.uiState.value.layers.filter { it.type == LayerType.PRODUCT }
+    assertTrue(gradedProdLayers.isNotEmpty())
+    assertTrue(gradedProdLayers.all {
+      it.colorFilter == ColorFilterPreset.CINEMATIC && kotlin.math.abs(it.filterIntensity - 0.85f) < 0.01f
+    })
+
+    vm.setProductFilterIntensity(0.45f)
+    assertEquals(0.45f, vm.uiState.value.productFilterIntensity, 0.01f)
+    assertTrue(vm.uiState.value.layers.filter { it.type == LayerType.PRODUCT }.all {
+      kotlin.math.abs(it.filterIntensity - 0.45f) < 0.01f
+    })
+
+    vm.resetProductFilter()
+    assertEquals(ColorFilterPreset.NONE, vm.uiState.value.activeProductFilter)
+    assertTrue(vm.uiState.value.layers.filter { it.type == LayerType.PRODUCT }.all {
+      it.colorFilter == ColorFilterPreset.NONE
+    })
   }
 
   @Test
@@ -333,5 +410,256 @@ class ExampleRobolectricTest {
     assertFalse(cancelOk)
     assertNotNull(cancelMsg)
     assertFalse(vm.uiState.value.isProcessingPayment)
+
+    // Stripe PaymentSheet backend payload parsing (with customer + ephemeralKey + fallback key)
+    val paymentSheetJson = JSONObject().apply {
+      put("paymentIntent", "pi_3QxProTest_secret_987654")
+      put("customer", "cus_test_omni_pro")
+      put("ephemeralKey", "ek_test_omni_pro")
+    }
+    val parsedSheetRes = gateway.parseBackendSessionPayload(
+      json = paymentSheetJson,
+      provider = PaymentProvider.STRIPE,
+      plan = SubscriptionPlan.PRO,
+      billingCycle = BillingCycle.MONTHLY,
+      amountUsd = 15.0,
+      billingEmail = "enjebeln@gmail.com",
+      customerName = "Creator Pro",
+      fallbackPublishableKey = "pk_test_demo_key_123"
+    )
+    assertTrue(parsedSheetRes.isSuccess)
+    val sheetSession = parsedSheetRes.getOrThrow()
+    assertEquals(CheckoutLaunchMode.STRIPE_PAYMENT_SHEET, sheetSession.launchMode)
+    assertEquals("pi_3QxProTest", sheetSession.sessionId)
+    assertNotNull(sheetSession.stripePaymentSheet)
+    assertEquals("pk_test_demo_key_123", sheetSession.stripePaymentSheet!!.publishableKey)
+    assertEquals("pi_3QxProTest_secret_987654", sheetSession.stripePaymentSheet!!.paymentIntentClientSecret)
+    assertEquals("cus_test_omni_pro", sheetSession.stripePaymentSheet!!.customerId)
+    assertEquals("ek_test_omni_pro", sheetSession.stripePaymentSheet!!.ephemeralKeySecret)
+
+    // PaymentSheet payload fails cleanly if no STRIPE_PUBLISHABLE_KEY is available
+    val missingKeySheetRes = gateway.parseBackendSessionPayload(
+      json = paymentSheetJson,
+      provider = PaymentProvider.STRIPE,
+      plan = SubscriptionPlan.PRO,
+      billingCycle = BillingCycle.MONTHLY,
+      amountUsd = 15.0,
+      billingEmail = "enjebeln@gmail.com",
+      customerName = "Creator Pro",
+      fallbackPublishableKey = "YOUR_STRIPE_PUBLISHABLE_KEY"
+    )
+    assertTrue(missingKeySheetRes.isFailure)
+
+    // Hosted Checkout URL payload still parses as EXTERNAL_BROWSER_URL
+    val hostedJson = JSONObject().apply {
+      put("sessionId", "cs_test_hosted_pro")
+      put("checkoutUrl", "https://checkout.stripe.com/c/pay/cs_test_hosted_pro")
+    }
+    val hostedRes = gateway.parseBackendSessionPayload(
+      json = hostedJson,
+      provider = PaymentProvider.STRIPE,
+      plan = SubscriptionPlan.PRO,
+      billingCycle = BillingCycle.YEARLY,
+      amountUsd = 144.0,
+      billingEmail = "enjebeln@gmail.com",
+      customerName = "Creator Pro"
+    )
+    assertTrue(hostedRes.isSuccess)
+    assertEquals(CheckoutLaunchMode.EXTERNAL_BROWSER_URL, hostedRes.getOrThrow().launchMode)
+
+    // Stripe PaymentSheet result handler behavior (cancel, fail, and unauthenticated complete)
+    assertFalse(vm.isStripePublishableKeyConfigured())
+    var stripeCancelOk = true
+    vm.handleStripePaymentSheetResult(
+      session = sheetSession,
+      completed = false,
+      cancelled = true,
+      errorMessage = null
+    ) { ok, _ -> stripeCancelOk = ok }
+    assertFalse(stripeCancelOk)
+    assertEquals(null, vm.uiState.value.activeStripePaymentSheetSession)
+    assertNotNull(vm.uiState.value.paymentError)
+
+    var stripeFailMsg: String? = null
+    vm.handleStripePaymentSheetResult(
+      session = sheetSession,
+      completed = false,
+      cancelled = false,
+      errorMessage = "Your card was declined."
+    ) { _, msg -> stripeFailMsg = msg }
+    assertEquals("Your card was declined.", stripeFailMsg)
+    assertEquals("Your card was declined.", vm.uiState.value.paymentError)
+
+    var stripeAuthGateOk = true
+    vm.handleStripePaymentSheetResult(
+      session = sheetSession,
+      completed = true,
+      cancelled = false,
+      errorMessage = null
+    ) { ok, _ -> stripeAuthGateOk = ok }
+    assertFalse(stripeAuthGateOk)
+    assertFalse(vm.uiState.value.isProcessingPayment)
+  }
+
+  @Test
+  fun studioTimelineTransitionIndicatorsAndSelectionMenu() {
+    val clips = listOf(
+      TimelineClip(
+        id = "c_part_1",
+        trackType = TimelineTrackType.PRODUCT,
+        name = "Clip A",
+        startTimeSec = 0f,
+        durationSec = 5f
+      ),
+      TimelineClip(
+        id = "c_part_2",
+        trackType = TimelineTrackType.PRODUCT,
+        name = "Clip B",
+        startTimeSec = 5f,
+        durationSec = 5f
+      )
+    )
+    var appliedClipId: String? = null
+    var appliedEffect: TransitionEffect? = null
+    var appliedDuration = 0f
+
+    composeTestRule.setContent {
+      MyApplicationTheme(darkTheme = true) {
+        StudioTimeline(
+          clips = clips,
+          selectedClipId = "c_part_2",
+          playheadSec = 2.5f,
+          totalDurationSec = 10f,
+          isPlaying = false,
+          onTogglePlay = {},
+          onSeekPlayhead = {},
+          onSelectClip = {},
+          onApplyTransitionToClip = { id, effect, dur ->
+            appliedClipId = id
+            appliedEffect = effect
+            appliedDuration = dur
+          },
+          onUpdateClip = { _, _, _ -> }
+        )
+      }
+    }
+
+    composeTestRule.waitForIdle()
+
+    // Inter-clip transition junction indicator appears at the boundary of c_part_2
+    composeTestRule.onNodeWithTag("transition_junction_c_part_2").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("transition_junction_c_part_2").performClick()
+    composeTestRule.waitForIdle()
+
+    // Menu opens with Fade, Slide, and Zoom selection options
+    composeTestRule.onNodeWithTag("timeline_transition_menu").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("timeline_menu_fade").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("timeline_menu_slide").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("timeline_menu_zoom").assertIsDisplayed()
+
+    // Selecting Fade applies FADE transition to c_part_2
+    composeTestRule.onNodeWithTag("timeline_menu_fade").performClick()
+    composeTestRule.waitForIdle()
+    assertEquals("c_part_2", appliedClipId)
+    assertEquals(TransitionEffect.FADE, appliedEffect)
+    assertEquals(TransitionEffect.FADE.defaultDurationSec, appliedDuration, 0.01f)
+
+    // Reopen via timeline toolbar Trans menu and select Slide & Zoom
+    composeTestRule.onNodeWithTag("timeline_transitions_btn").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("timeline_menu_slide").performClick()
+    composeTestRule.waitForIdle()
+    assertEquals(TransitionEffect.SLIDE_LEFT, appliedEffect)
+
+    composeTestRule.onNodeWithTag("timeline_transitions_btn").performClick()
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("timeline_menu_zoom").performClick()
+    composeTestRule.waitForIdle()
+    assertEquals(TransitionEffect.ZOOM_IN, appliedEffect)
+  }
+
+  @Test
+  fun colorGradingMatrixAndFiltersScreenInteractions() {
+    // Verify ColorGradingUtils matrix generation under Android graphics runtime
+    assertNull(ColorGradingUtils.toComposeColorFilter(ColorFilterPreset.NONE, 1.0f))
+    assertNull(ColorGradingUtils.toAndroidColorFilter(ColorFilterPreset.CINEMATIC, 0.0f))
+    assertNotNull(ColorGradingUtils.toComposeColorFilter(ColorFilterPreset.CINEMATIC, 1.0f))
+    assertNotNull(ColorGradingUtils.toAndroidColorFilter(ColorFilterPreset.VINTAGE, 0.8f))
+
+    val identity = ColorGradingUtils.buildColorMatrixArray(ColorFilterPreset.NONE, 1.0f)
+    assertEquals(1.0f, identity[0], 0.001f)
+    assertEquals(1.0f, identity[6], 0.001f)
+    assertEquals(1.0f, identity[12], 0.001f)
+    assertEquals(0.0f, identity[4], 0.001f)
+
+    // Noir B&W collapses RGB rows equally (luma monochrome)
+    val noir = ColorGradingUtils.buildColorMatrixArray(ColorFilterPreset.NOIR_MONO, 1.0f)
+    assertEquals(noir[0], noir[5], 0.001f)
+    assertEquals(noir[5], noir[10], 0.001f)
+
+    // Vintage & Golden Hour apply warm red > blue bias
+    val vintage = ColorGradingUtils.buildColorMatrixArray(ColorFilterPreset.VINTAGE, 1.0f)
+    assertTrue(vintage[4] > vintage[14])
+
+    // Render FiltersScreen and verify preset selection & reset actions
+    var selectedPreset = ColorFilterPreset.NONE
+    var resetCalled = false
+    var previewStudioCalled = false
+    val sampleLayers = listOf(
+      CanvasLayer(
+        id = "prod_layer",
+        name = "Product",
+        type = LayerType.PRODUCT,
+        colorFilter = ColorFilterPreset.NONE
+      )
+    )
+
+    composeTestRule.setContent {
+      MyApplicationTheme(darkTheme = true) {
+        FiltersScreen(
+          layers = sampleLayers,
+          activeFilter = selectedPreset,
+          intensity = 1.0f,
+          onSelectFilter = { selectedPreset = it },
+          onIntensityChanged = {},
+          onResetFilter = { resetCalled = true },
+          onPreviewInStudio = { previewStudioCalled = true }
+        )
+      }
+    }
+
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("filters_screen").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("active_css_filter_spec").assertIsDisplayed()
+
+    // Select Cinematic, Vibrant, and Vintage presets via LazyColumn scroll
+    composeTestRule.onNodeWithTag("filters_screen").performScrollToNode(hasTestTag("filter_preset_CINEMATIC"))
+    composeTestRule.onNodeWithTag("filter_preset_CINEMATIC").performClick()
+    composeTestRule.waitForIdle()
+    assertEquals(ColorFilterPreset.CINEMATIC, selectedPreset)
+
+    composeTestRule.onNodeWithTag("filters_screen").performScrollToNode(hasTestTag("filter_preset_VIBRANT"))
+    composeTestRule.onNodeWithTag("filter_preset_VIBRANT").performClick()
+    composeTestRule.waitForIdle()
+    assertEquals(ColorFilterPreset.VIBRANT, selectedPreset)
+
+    composeTestRule.onNodeWithTag("filters_screen").performScrollToNode(hasTestTag("filter_preset_VINTAGE"))
+    composeTestRule.onNodeWithTag("filter_preset_VINTAGE").performClick()
+    composeTestRule.waitForIdle()
+    assertEquals(ColorFilterPreset.VINTAGE, selectedPreset)
+
+    // Compare toggle & Reset / Preview actions work
+    composeTestRule.onNodeWithTag("filters_screen").performScrollToNode(hasTestTag("filters_compare_toggle"))
+    composeTestRule.onNodeWithTag("filters_compare_toggle").performClick()
+    composeTestRule.waitForIdle()
+
+    composeTestRule.onNodeWithTag("filters_screen").performScrollToNode(hasTestTag("filters_reset_btn"))
+    composeTestRule.onNodeWithTag("filters_reset_btn").performClick()
+    composeTestRule.waitForIdle()
+    assertTrue(resetCalled)
+
+    composeTestRule.onNodeWithTag("filters_apply_studio_btn").performClick()
+    composeTestRule.waitForIdle()
+    assertTrue(previewStudioCalled)
   }
 }

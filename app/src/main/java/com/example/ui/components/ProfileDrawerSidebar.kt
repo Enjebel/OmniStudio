@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.CompareArrows
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Bolt
@@ -31,6 +32,7 @@ import androidx.compose.material.icons.filled.DynamicFeed
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.MovieCreation
+import androidx.compose.material.icons.filled.PhotoFilter
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.WorkspacePremium
@@ -440,6 +442,26 @@ fun ProfileDrawerSidebar(
                     selected = activeModule == OmniModule.MUSE_AI,
                     onClick = {
                         onSelectModule(OmniModule.MUSE_AI)
+                        onCloseDrawer()
+                    }
+                )
+                DrawerNavItem(
+                    icon = Icons.AutoMirrored.Filled.CompareArrows,
+                    label = "Transitions",
+                    subtitle = "Fade, slide & zoom clip cuts",
+                    selected = activeModule == OmniModule.TRANSITIONS,
+                    onClick = {
+                        onSelectModule(OmniModule.TRANSITIONS)
+                        onCloseDrawer()
+                    }
+                )
+                DrawerNavItem(
+                    icon = Icons.Default.PhotoFilter,
+                    label = "Filters",
+                    subtitle = "CSS color grading presets",
+                    selected = activeModule == OmniModule.FILTERS,
+                    onClick = {
+                        onSelectModule(OmniModule.FILTERS)
                         onCloseDrawer()
                     }
                 )

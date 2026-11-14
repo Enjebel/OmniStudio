@@ -303,6 +303,9 @@ fun DirectorChatScreen(
         ) {
             val quickCommands = listOf(
                 "Make this punchier for TikTok",
+                "Add smooth fade transition between clips",
+                "Add slide transition to next clip",
+                "Add zoom punch transition to all clips",
                 "Cut out dead air",
                 "Add a suspenseful transition here",
                 "Switch to luxury gold showcase"

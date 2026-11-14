@@ -89,6 +89,7 @@ fun ProUpgradeModal(
     isPaymentBackendConfigured: Boolean,
     isFlutterwaveConfigured: Boolean = false,
     isStripeLinkConfigured: Boolean = false,
+    isStripePublishableKeyConfigured: Boolean = false,
     onSelectProvider: (PaymentProvider) -> Unit,
     onStartPlanCheckout: (
         plan: SubscriptionPlan,
@@ -441,12 +442,14 @@ fun ProUpgradeModal(
                             "Flutterwave Inline v3 ready • Opens secure in-app checkout (no backend server required)."
                         selectedProvider == PaymentProvider.FLUTTERWAVE ->
                             "Add FLUTTERWAVE_PUBLIC_KEY (no backend needed) or PAYMENT_BACKEND_URL in the AI Studio Secrets panel."
+                        selectedProvider == PaymentProvider.STRIPE && isPaymentBackendConfigured && isStripePublishableKeyConfigured ->
+                            "Stripe PaymentSheet & Backend ready • Secure PRO upgrades via encrypted card checkout."
                         selectedProvider == PaymentProvider.STRIPE && isPaymentBackendConfigured ->
-                            "Stripe server checkout ready."
+                            "Stripe server checkout ready • Add STRIPE_PUBLISHABLE_KEY for native PaymentSheet."
                         selectedProvider == PaymentProvider.STRIPE && isStripeLinkConfigured ->
                             "Stripe Payment Link ready • Opens hosted checkout in browser."
                         else ->
-                            "Add PAYMENT_BACKEND_URL or STRIPE_PAYMENT_LINK_URL in the AI Studio Secrets panel to route Stripe checkouts."
+                            "Add PAYMENT_BACKEND_URL and STRIPE_PUBLISHABLE_KEY (or STRIPE_PAYMENT_LINK_URL) in the AI Studio Secrets panel."
                     }
 
                     Spacer(modifier = Modifier.height(10.dp))
